@@ -25,6 +25,7 @@
 - **Type d'affichage au choix** : Joue, Écoute, Regarde ou Participe.
 - **Démarrage avec Windows** en option.
 - **Accès rapide** aux pages du serveur : site, musique et statistiques.
+- **Musique du salon vocal** (option, désactivée par défaut) : quand NakaBOT joue de la musique dans ton salon vocal sur NAKA, ton profil affiche « Écoute <titre> » avec l'artiste, la pochette et la progression. À la première activation, Discord te demande d'autoriser Naka Bot (accès à ton identité seulement).
 - **Mises à jour intégrées** : recherche au lancement ou sur demande, pastille quand une version est disponible, installation après confirmation.
 - **Légère** : quelques Mo de mémoire au repos.
 - **Désinstallation propre** : rien ne reste sur le système.

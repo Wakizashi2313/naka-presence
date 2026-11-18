@@ -33,7 +33,7 @@ def trim_memory() -> None:
         pass
 
 APP_NAME = "NAKA Presence"
-APP_VERSION = "1.1.1"  # reprise par build.ps1 pour l'installateur
+APP_VERSION = "1.2.0"  # reprise par build.ps1 pour l'installateur
 MUTEX_NAME = "NakaPresenceMutex"
 REPO = "Wakizashi2313/naka-presence"
 SETUP_ASSET = "NakaPresence-Setup.exe"
@@ -77,6 +77,8 @@ DEFAULT_CONFIG = {
     "details": "𝗡𝗔𝗞𝗔 🌸 - Serveur accueillant ✦ Kiss or Kill ✦ 10 grades à débloquer",
     "state": "Stats, Lovecalc & Mariages ✦ Rejoins-nous ! .gg/nakaa",
     "activity_type": 0,  # 0 = Joue à, 2 = Écoute, 3 = Regarde, 5 = Participe à
+    # musique jouée par NakaBOT dans le salon vocal (serveur NAKA) : désactivée par défaut
+    "music_presence": False,
     "large_image": "",
     "large_text": "",
     "small_image": "",
@@ -244,6 +246,50 @@ def download_setup(info: dict) -> Path:
     return target
 
 
+# --- musique du salon vocal (API de NakaBOT sur le site du lecteur) ----------------
+
+MUSIC_SITE = "https://musique.naka-discord.fr"
+MUSIC_POLL = 10  # secondes entre deux questions à NakaBOT (seulement si l'option est activée)
+MUSIC_TOKEN_FILE = CONFIG_DIR / "music_link.json"
+
+
+def _http_json(url: str, data: dict | None = None, token: str = "") -> dict:
+    """GET (ou POST JSON) ; PermissionError si le jeton est refusé (401)."""
+    import urllib.error
+    import urllib.request
+    headers = {"User-Agent": f"NakaPresence/{APP_VERSION}", "Accept": "application/json"}
+    body = None
+    if data is not None:
+        body = json.dumps(data).encode("utf-8")
+        headers["Content-Type"] = "application/json"
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    req = urllib.request.Request(url, data=body, headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        if exc.code == 401:
+            raise PermissionError("jeton refusé") from exc
+        raise
+
+
+def load_music_token() -> str:
+    try:
+        return str(json.loads(MUSIC_TOKEN_FILE.read_text(encoding="utf-8")).get("token") or "")
+    except (OSError, ValueError, AttributeError):
+        return ""
+
+
+def save_music_token(token: str) -> None:
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    MUSIC_TOKEN_FILE.write_text(json.dumps({"token": token}), encoding="utf-8")
+
+
+def clear_music_token() -> None:
+    MUSIC_TOKEN_FILE.unlink(missing_ok=True)
+
+
 # --- présence ------------------------------------------------------------------
 
 class PresenceWorker(threading.Thread):
@@ -257,6 +303,8 @@ class PresenceWorker(threading.Thread):
         # après une mise à jour ou un redémarrage, le minuteur reprend où il s'était arrêté
         self.started_at = int(time.time()) - take_resume()
         self.status = "Démarrage…"
+        self.music: dict | None = None   # morceau joué par NakaBOT dans le salon vocal
+        self.music_note = ""             # raison d'un arrêt de l'option musique
 
     def _close(self) -> None:
         if self.rpc is not None:
@@ -335,11 +383,13 @@ class PresenceWorker(threading.Thread):
                     self.rpc.connect()
                     self.rpc_id = client_id
                 payload = self._payload(cfg)
-                if payload:
+                if self.music is not None:
+                    self.rpc.update(payload_override=self._music_payload(cfg))
+                elif payload:
                     self.rpc.update(payload_override=self._raw_payload(payload))
                 else:
                     self.rpc.clear()
-                self._set_status("Active")
+                self._set_status("Active · musique" if self.music is not None else "Active")
             except Exception:
                 self._close()
                 self._set_status("En attente de Discord…")
@@ -355,16 +405,126 @@ class PresenceWorker(threading.Thread):
             return False
         return True
 
+    # --- musique du salon vocal (option, désactivée par défaut) ---------------------
+    def _music_wanted(self, cfg: dict) -> bool:
+        return bool(cfg.get("enabled") and cfg.get("music_presence"))
+
+    def _music_off(self, note: str) -> None:
+        """Coupe l'option (liaison refusée ou expirée) et le dit dans le menu."""
+        self.music = None
+        self.app.cfg["music_presence"] = False
+        save_config(self.app.cfg)
+        self.music_note = note
+        self.app.menu.refresh()
+
+    def _link(self) -> None:
+        """Liaison du compte : fenêtre d'autorisation dans Discord, puis jeton remis par NakaBOT."""
+        if self.rpc is None:
+            return
+        old_timeout = getattr(self.rpc, "response_timeout", None)
+        try:
+            self.rpc.response_timeout = 120  # le temps de cliquer sur « Autoriser »
+            self.rpc.send_data(1, {"cmd": "AUTHORIZE", "nonce": str(time.time_ns()),
+                                   "args": {"client_id": self.rpc_id, "scopes": ["identify"]}})
+            reply = self.rpc.loop.run_until_complete(self.rpc.read_output())
+        except Exception:
+            self._close()   # connexion dans un état inconnu : on la refait proprement
+            self._music_off("Liaison annulée")
+            return
+        finally:
+            if self.rpc is not None and old_timeout is not None:
+                self.rpc.response_timeout = old_timeout
+        code = str((reply.get("data") or {}).get("code") or "")
+        if not code:
+            self._music_off("Liaison refusée dans Discord")
+            return
+        try:
+            data = _http_json(f"{MUSIC_SITE}/api/presence/link", {"code": code})
+            save_music_token(str(data["token"]))
+            self.music_note = ""
+        except Exception:
+            self._music_off("Liaison impossible avec NakaBOT")
+
+    def _poll_music(self) -> None:
+        token = load_music_token()
+        if not token:
+            self._link()
+            token = load_music_token()
+            if not token:
+                return
+        try:
+            data = _http_json(f"{MUSIC_SITE}/api/presence/now", token=token)
+        except PermissionError:
+            clear_music_token()
+            self._music_off("Liaison expirée : réactive l'option")
+            return
+        except Exception:
+            return          # NakaBOT injoignable : on garde l'affichage actuel
+        if not data.get("playing"):
+            self.music = None
+            return
+        now = time.time()
+        start = int(now - float(data.get("position") or 0))
+        old = self.music
+        same_track = old is not None and (old["title"], old["artist"]) == (data.get("title"), data.get("artist"))
+        if same_track and abs(start - old["start"]) <= 3:
+            start = old["start"]    # simple décalage de mesure : rien à renvoyer à Discord
+        self.music = {
+            "title": str(data.get("title") or "")[:128] or "Musique",
+            "artist": str(data.get("artist") or "")[:100],
+            "duration": int(data.get("duration") or 0), "paused": bool(data.get("paused")),
+            "thumbnail": str(data.get("thumbnail") or ""), "channel": str(data.get("channel") or ""),
+            "guild_id": str(data.get("guild_id") or ""), "start": start,
+        }
+
+    def _music_sig(self) -> str:
+        m = self.music
+        if m is None:
+            return ""
+        return json.dumps([m["title"], m["artist"], m["paused"], m["duration"], m["thumbnail"],
+                           m["channel"], None if m["paused"] else m["start"]])
+
+    def _music_payload(self, cfg: dict) -> dict:
+        """« Écoute <titre> » : artiste, barre de progression, pochette, salon au survol."""
+        m = self.music
+        activity: dict = {"type": 2, "status_display_type": 2, "instance": True,
+                          "details": m["title"]}
+        artist = m["artist"] or "NAKA"
+        activity["state"] = f"⏸ En pause · {artist}"[:128] if m["paused"] else artist
+        if not m["paused"]:
+            activity["timestamps"] = {"start": m["start"]}
+            if m["duration"] > 0:
+                activity["timestamps"]["end"] = m["start"] + m["duration"]
+        assets = {"large_text": f"🔊 {m['channel']}"[:128] if m["channel"] else "NAKA"}
+        if m["thumbnail"].startswith("https://"):
+            assets["large_image"] = m["thumbnail"]
+        activity["assets"] = assets
+        buttons = [{"label": "Écouter avec nous",
+                    "url": f"{MUSIC_SITE}/g/{m['guild_id'] or GUILD_ID}"}]
+        join = next((b for b in cfg.get("buttons", []) if "discord.gg" in str(b.get("url", ""))), None)
+        if join:
+            buttons.append({"label": str(join.get("label", ""))[:32], "url": str(join["url"])})
+        activity["buttons"] = buttons
+        return {"cmd": "SET_ACTIVITY", "args": {"pid": os.getpid(), "activity": activity},
+                "nonce": str(time.time_ns())}
+
     def run(self) -> None:
         # Discord n'affiche qu'une mise à jour d'activité toutes les ~15 s : on n'envoie
         # l'activité que lorsqu'elle change, et on surveille la connexion par PING.
         last_sig = None
         last_check = time.time()
+        last_music = 0.0
         last_trim = time.time() - 50  # premier nettoyage ~10 s après le lancement
         while not self.stop_event.is_set():
             self.app.reload_if_changed()
             cfg = self.app.cfg
-            sig = json.dumps(cfg, sort_keys=True)
+            if not self._music_wanted(cfg):
+                self.music = None
+            elif self.rpc is not None and time.time() - last_music >= MUSIC_POLL:
+                last_music = time.time()
+                self._poll_music()
+                cfg = self.app.cfg
+            sig = json.dumps(cfg, sort_keys=True) + self._music_sig()
             if self.refresh.is_set() or sig != last_sig:
                 self.refresh.clear()
                 self._apply(cfg)
@@ -611,6 +771,8 @@ class TrayMenu:
                   lambda: app.cfg["enabled"], keep_open=True)
         self._row(body, "", "Démarrer avec Windows", app.toggle_autostart,
                   autostart_enabled, keep_open=True)
+        self._row(body, "", "Musique du salon vocal", app.toggle_music,
+                  lambda: bool(app.cfg.get("music_presence")), keep_open=True)
         self._separator(body)
         self._type_selector(body)
         self._separator(body)
@@ -911,9 +1073,11 @@ class TrayMenu:
             pass
         if self.status_label is not None:
             status = self.app.worker.status
+            active = status.startswith("Active")
+            note = self.app.worker.music_note
             self.status_label.configure(
-                text=("● " if status == "Active" else "○ ") + status,
-                fg=GREEN if status == "Active" else MUTED)
+                text=("● " if active else "○ ") + status + (f" · {note}" if note else ""),
+                fg=GREEN if active and not note else MUTED)
 
 
 def _text_width(widget, text: str, font) -> int:
@@ -1011,6 +1175,12 @@ class App:
         if self.cfg.get("activity_type") != value:
             self.cfg["activity_type"] = value
             self._save()
+
+    def toggle_music(self, *_: object) -> None:
+        # à la première activation, le PresenceWorker ouvre la fenêtre d'autorisation de Discord
+        self.cfg["music_presence"] = not self.cfg.get("music_presence")
+        self.worker.music_note = ""
+        self._save()
 
     def toggle_autostart(self, *_: object) -> None:
         set_autostart(not autostart_enabled())
