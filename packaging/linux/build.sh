@@ -1,5 +1,5 @@
 #!/bin/sh
-# Construit dist/naka-presence_<version>_all.deb et dist/naka-presence-<version>-1.noarch.rpm.
+# Construit dist/naka-presence_all.deb et dist/naka-presence.noarch.rpm (noms fixes : lien « latest » stable).
 # Prérequis : python3 + pip, nfpm (https://nfpm.goreleaser.com).
 set -eu
 cd "$(dirname "$0")/../.."
@@ -16,6 +16,6 @@ find build/linux/vendor -name '__pycache__' -prune -exec rm -rf {} +
 rm -rf build/linux/vendor/bin
 
 python3 -m py_compile naka_presence.py
-nfpm package --config packaging/linux/nfpm.yaml --packager deb --target dist/
-nfpm package --config packaging/linux/nfpm.yaml --packager rpm --target dist/
+nfpm package --config packaging/linux/nfpm.yaml --packager deb --target dist/naka-presence_all.deb
+nfpm package --config packaging/linux/nfpm.yaml --packager rpm --target dist/naka-presence.noarch.rpm
 ls -l dist/*.deb dist/*.rpm

@@ -5,7 +5,7 @@
 <h1 align="center">NAKA Presence</h1>
 
 <p align="center">
-  Affiche la présence du serveur Discord <b>NAKA</b> sur ton profil, pilotée depuis la barre des tâches Windows.
+  Affiche la présence du serveur Discord <b>NAKA</b> sur ton profil, pilotée depuis la zone de notification de Windows ou de Linux.
 </p>
 
 <p align="center">
@@ -32,6 +32,8 @@
 
 ## Installation
 
+### Windows
+
 1. Télécharge [`NakaPresence-Setup.exe`](https://github.com/Wakizashi2313/naka-presence/releases/latest/download/NakaPresence-Setup.exe).
 2. Lance-le. Aucun droit administrateur n'est nécessaire.
 3. Garde **Discord pour ordinateur** ouvert (la version navigateur ne fonctionne pas).
@@ -41,27 +43,55 @@
 > **Informations complémentaires**, puis sur **Exécuter quand même**. Le code source est
 > entièrement disponible ici.
 
+### Linux (Debian, Ubuntu, Fedora…)
+
+**Debian / Ubuntu**
+
+```sh
+wget https://github.com/Wakizashi2313/naka-presence/releases/latest/download/naka-presence_all.deb
+sudo apt install ./naka-presence_all.deb
+```
+
+**Fedora**
+
+```sh
+sudo dnf install https://github.com/Wakizashi2313/naka-presence/releases/latest/download/naka-presence.noarch.rpm
+```
+
+Puis lance **NAKA Presence** depuis le menu des applications. Discord peut être installé
+de n'importe quelle façon : paquet, Flatpak ou Snap.
+
+> **Bureau GNOME (Fedora, Debian) : pas d'icône près de l'horloge ?**
+> GNOME n'affiche les icônes de notification qu'avec l'extension *AppIndicator* :
+> `sudo apt install gnome-shell-extension-appindicator` (Debian / Ubuntu) ou
+> `sudo dnf install gnome-shell-extension-appindicator` (Fedora), puis déconnecte-toi,
+> reconnecte-toi et active-la dans l'application **Extensions**. Sans elle, la présence
+> fonctionne quand même : relancer **NAKA Presence** depuis le menu des applications
+> ouvre son menu. KDE, Xfce et Cinnamon affichent l'icône sans rien installer.
+
 ### Prérequis
 
-- Windows 10 ou 11 (64 bits). Les coins arrondis et la transparence du menu sont plus beaux sous Windows 11.
+- Windows 10 ou 11 (64 bits), ou Linux de bureau (Debian 12+, Ubuntu 22.04+, Fedora 39+).
 - Discord pour ordinateur, avec **Paramètres → Confidentialité des activités → Partager mon activité détectée** activé.
 
 ## Utilisation
 
 | Action | Effet |
 |---|---|
-| Double-clic sur l'icône | Active ou désactive la présence |
-| Clic droit sur l'icône | Ouvre le menu |
+| Double-clic sur l'icône (Windows) | Active ou désactive la présence |
+| Clic droit sur l'icône (Windows) | Ouvre le menu |
+| Clic sur l'icône (Linux) | Menu rapide ; « Ouvrir NAKA Presence » affiche le menu complet |
 | Menu → Affichage sur le profil | Choisit « Joue », « Écoute », « Regarde » ou « Participe » |
 | Menu → Mise à jour | Cherche une nouvelle version et propose de l'installer |
 | Menu → Redémarrer | Relance l'application |
-| Menu → Désinstaller | Supprime l'application et tous ses fichiers |
+| Menu → Désinstaller (Windows) | Supprime l'application et tous ses fichiers |
 
 Discord n'affiche qu'une mise à jour de présence toutes les 15 secondes environ. Deux changements rapprochés peuvent donc mettre quelques secondes à apparaître.
 
 ### Personnaliser les textes
 
-Les réglages sont dans `%APPDATA%\NakaPresence\config.json` et sont pris en compte automatiquement en quelques secondes :
+Les réglages sont dans `%APPDATA%\NakaPresence\config.json` (Windows) ou
+`~/.config/naka-presence/config.json` (Linux) et sont pris en compte automatiquement en quelques secondes :
 
 | Clé | Rôle |
 |---|---|
@@ -73,7 +103,12 @@ Les réglages sont dans `%APPDATA%\NakaPresence\config.json` et sont pris en com
 
 ## Désinstallation
 
-Depuis le menu (**Désinstaller**) ou depuis **Paramètres Windows → Applications installées**. Sont supprimés :
+**Linux** : `sudo apt remove naka-presence` ou `sudo dnf remove naka-presence`. La
+configuration (`~/.config/naka-presence`) et le démarrage automatique
+(`~/.config/autostart/naka-presence.desktop`) restent dans ton dossier personnel : supprime-les
+si tu veux tout effacer.
+
+**Windows** : depuis le menu (**Désinstaller**) ou depuis **Paramètres Windows → Applications installées**. Sont supprimés :
 
 - le dossier de l'application (`%LOCALAPPDATA%\Programs\NAKA Presence`) ;
 - la configuration (`%APPDATA%\NakaPresence`) ;
@@ -90,6 +125,10 @@ Il faut Python 3.12 ou plus récent et [Inno Setup](https://jrsoftware.org/isinf
 ```
 
 Le résultat est `dist\NakaPresence-Setup.exe`. Pour lancer sans compiler : `python naka_presence.py`.
+
+Paquets Linux : `sh packaging/linux/build.sh` (Python 3 et [nfpm](https://nfpm.goreleaser.com)).
+Le workflow `.github/workflows/linux.yml` les construit, les installe et les lance sur
+Debian 12, Debian 13 et Fedora, puis les joint à chaque release.
 
 ## Licence
 
