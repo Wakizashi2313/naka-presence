@@ -24,6 +24,7 @@
 - **Icône dans la zone de notification** : double-clic pour activer ou désactiver, clic droit pour le menu.
 - **Type d'affichage au choix** : Joue, Écoute, Regarde ou Participe.
 - **Démarrage avec Windows** en option.
+- **Accès rapide** aux pages du serveur : site, musique et statistiques.
 - **Mises à jour intégrées** : recherche au lancement ou sur demande, pastille quand une version est disponible, installation après confirmation.
 - **Légère** : quelques Mo de mémoire au repos.
 - **Désinstallation propre** : rien ne reste sur le système.

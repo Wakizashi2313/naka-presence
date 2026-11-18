@@ -33,7 +33,7 @@ def trim_memory() -> None:
         pass
 
 APP_NAME = "NAKA Presence"
-APP_VERSION = "1.1.0"  # reprise par build.ps1 pour l'installateur
+APP_VERSION = "1.1.1"  # reprise par build.ps1 pour l'installateur
 MUTEX_NAME = "NakaPresenceMutex"
 REPO = "Wakizashi2313/naka-presence"
 SETUP_ASSET = "NakaPresence-Setup.exe"
@@ -92,6 +92,14 @@ OLD_DEFAULT_BUTTONS = [{"label": "Rejoindre le serveur", "url": "https://discord
 
 # type d'activité Discord -> libellé affiché dans le menu
 ACTIVITY_TYPES = [(0, "Joue"), (2, "Écoute"), (3, "Regarde"), (5, "Participe")]
+
+# accès rapide aux pages du serveur : (icône Segoe Fluent, libellé, adresse)
+GUILD_ID = "1500775639706370151"
+QUICK_LINKS = [
+    ("", "Site", "https://naka-discord.fr/"),                                # globe
+    ("", "Musique", f"https://musique.naka-discord.fr/g/{GUILD_ID}"),       # casque
+    ("", "Stats", f"https://stats.naka-discord.fr/g/{GUILD_ID}"),           # graphique
+]
 
 WM_LBUTTONDBLCLK = 0x0203
 WM_RBUTTONUP = 0x0205
@@ -606,6 +614,8 @@ class TrayMenu:
         self._separator(body)
         self._type_selector(body)
         self._separator(body)
+        self._quick_links(body)
+        self._separator(body)
         self._actions(body)
         self._separator(body)
         self._row(body, "", "Quitter", app.quit)
@@ -733,6 +743,20 @@ class TrayMenu:
         # gardée par le menu et oubliée à sa fermeture
         self.redraws.append(draw)
         return cv
+
+    def _quick_links(self, parent: tk.Frame) -> None:
+        """Site / Musique / Stats : ouvre la page dans le navigateur et ferme le menu."""
+        s = self.s
+        tk.Label(parent, text="Accès rapide", bg=BG, fg=MUTED, font=("Segoe UI", 9),
+                 anchor="w").pack(fill="x", padx=int(12 * s), pady=(int(2 * s), int(4 * s)))
+        bar = tk.Frame(parent, bg=BG)
+        bar.pack(fill="x", padx=int(6 * s), pady=(0, int(4 * s)))
+        for glyph, text, url in QUICK_LINKS:
+            def open_page(u=url) -> None:
+                self._close()
+                os.startfile(u)  # type: ignore[attr-defined]  (navigateur par défaut)
+            self._button(bar, text, open_page, glyph=glyph).pack(
+                side="left", fill="x", expand=True, padx=int(2 * s))
 
     def _actions(self, parent: tk.Frame) -> None:
         s = self.s
