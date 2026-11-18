@@ -2,11 +2,15 @@
 ; désinstallation sans trace.
 #define AppName "NAKA Presence"
 #define AppExe "NakaPresence.exe"
+; version transmise par build.ps1 (APP_VERSION de naka_presence.py)
+#ifndef AppVersion
+  #define AppVersion "0.0.0"
+#endif
 
 [Setup]
 AppId={{6F1B7C52-3D0E-4A59-9B5A-1A2B3C4D5E6F}
 AppName={#AppName}
-AppVersion=1.0.0
+AppVersion={#AppVersion}
 AppPublisher=NAKA
 PrivilegesRequired=lowest
 DefaultDirName={autopf}\{#AppName}
@@ -53,6 +57,8 @@ Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueName: 
 
 [Run]
 Filename: "{app}\{#AppExe}"; Description: "Lancer {#AppName}"; Flags: nowait postinstall skipifsilent
+; mise à jour lancée depuis l'application (mode silencieux) : on la relance
+Filename: "{app}\{#AppExe}"; Flags: nowait; Check: WizardSilent
 
 [UninstallDelete]
 Type: filesandordirs; Name: "{userappdata}\NakaPresence"

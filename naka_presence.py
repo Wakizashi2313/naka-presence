@@ -33,11 +33,43 @@ def trim_memory() -> None:
         pass
 
 APP_NAME = "NAKA Presence"
+APP_VERSION = "1.1.0"  # reprise par build.ps1 pour l'installateur
+MUTEX_NAME = "NakaPresenceMutex"
+REPO = "Wakizashi2313/naka-presence"
+SETUP_ASSET = "NakaPresence-Setup.exe"
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 RUN_VALUE = "NakaPresence"
 
 CONFIG_DIR = Path(os.environ.get("APPDATA", Path.home())) / "NakaPresence"
 CONFIG_FILE = CONFIG_DIR / "config.json"
+# minuteur mis de côté pendant une mise à jour ou un redémarrage
+RESUME_FILE = CONFIG_DIR / "resume.json"
+RESUME_MAX_AGE = 600  # au-delà (mise à jour échouée, relance bien plus tard), on repart de zéro
+
+
+def save_resume(started_at: int) -> None:
+    """Retient le temps écoulé pour que le minuteur reprenne au lancement suivant."""
+    now = int(time.time())
+    try:
+        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        RESUME_FILE.write_text(json.dumps({"elapsed": max(0, now - started_at), "saved": now}),
+                               encoding="utf-8")
+    except OSError:
+        pass
+
+
+def take_resume() -> int:
+    """Temps écoulé à reprendre (0 si rien de récent) ; le fichier est consommé."""
+    try:
+        data = json.loads(RESUME_FILE.read_text(encoding="utf-8"))
+        RESUME_FILE.unlink()
+    except (OSError, ValueError):
+        return 0
+    try:
+        age = int(time.time()) - int(data["saved"])
+        return int(data["elapsed"]) if 0 <= age <= RESUME_MAX_AGE else 0
+    except (KeyError, TypeError, ValueError):
+        return 0
 
 DEFAULT_CONFIG = {
     "enabled": True,
@@ -49,8 +81,14 @@ DEFAULT_CONFIG = {
     "large_text": "",
     "small_image": "",
     "small_text": "",
-    "buttons": [{"label": "Rejoindre le serveur", "url": "https://discord.gg/ZnfGhv8eAx"}],
+    "buttons": [
+        {"label": "Visiter le site", "url": "https://naka-discord.fr/"},
+        {"label": "Rejoindre le serveur", "url": "https://discord.gg/ZnfGhv8eAx"},
+    ],
 }
+
+# boutons par défaut de la v1.0.0 : remplacés automatiquement par les nouveaux
+OLD_DEFAULT_BUTTONS = [{"label": "Rejoindre le serveur", "url": "https://discord.gg/ZnfGhv8eAx"}]
 
 # type d'activité Discord -> libellé affiché dans le menu
 ACTIVITY_TYPES = [(0, "Joue"), (2, "Écoute"), (3, "Regarde"), (5, "Participe")]
@@ -72,6 +110,9 @@ def load_config() -> dict:
             cfg.update(json.loads(CONFIG_FILE.read_text(encoding="utf-8")))
         except (OSError, ValueError):
             pass
+        if cfg.get("buttons") == OLD_DEFAULT_BUTTONS:
+            cfg["buttons"] = DEFAULT_CONFIG["buttons"]
+            save_config(cfg)
     else:
         save_config(cfg)
     return cfg
@@ -142,6 +183,59 @@ def uninstaller_path() -> Path | None:
     return path if path.exists() else None
 
 
+# --- mises à jour (release GitHub la plus récente) -------------------------------
+
+def _version_tuple(text: str) -> tuple[int, ...]:
+    parts = []
+    for part in text.strip().lstrip("vV").split("."):
+        digits = "".join(ch for ch in part if ch.isdigit())
+        parts.append(int(digits or 0))
+    return tuple(parts)
+
+
+def _http_get(url: str, timeout: float = 15):
+    import urllib.request  # chargé seulement au besoin (mémoire)
+    req = urllib.request.Request(url, headers={
+        "User-Agent": f"NakaPresence/{APP_VERSION}",
+        "Accept": "application/vnd.github+json",
+    })
+    return urllib.request.urlopen(req, timeout=timeout)
+
+
+def fetch_latest_release() -> dict | None:
+    """Renvoie {version, url, digest} si une version plus récente existe, sinon None."""
+    with _http_get(f"https://api.github.com/repos/{REPO}/releases/latest") as resp:
+        data = json.loads(resp.read().decode("utf-8"))
+    version = str(data.get("tag_name", "")).lstrip("vV")
+    if not version or _version_tuple(version) <= _version_tuple(APP_VERSION):
+        return None
+    for asset in data.get("assets", []):
+        if asset.get("name") == SETUP_ASSET:
+            return {"version": version, "url": asset["browser_download_url"],
+                    "digest": str(asset.get("digest") or "")}
+    return None
+
+
+def download_setup(info: dict) -> Path:
+    """Télécharge l'installateur dans %TEMP% et vérifie son empreinte SHA-256."""
+    import hashlib
+    import tempfile
+    target = Path(tempfile.gettempdir()) / f"NakaPresence-Setup-{info['version']}.exe"
+    sha = hashlib.sha256()
+    tmp = target.with_suffix(".part")
+    with _http_get(info["url"], timeout=60) as resp, open(tmp, "wb") as out:
+        while chunk := resp.read(1 << 16):
+            sha.update(chunk)
+            out.write(chunk)
+    expected = info.get("digest", "")
+    if expected.startswith("sha256:") and expected[7:].lower() != sha.hexdigest():
+        tmp.unlink(missing_ok=True)
+        raise ValueError("empreinte SHA-256 incorrecte")
+    target.unlink(missing_ok=True)
+    tmp.rename(target)
+    return target
+
+
 # --- présence ------------------------------------------------------------------
 
 class PresenceWorker(threading.Thread):
@@ -152,7 +246,8 @@ class PresenceWorker(threading.Thread):
         self.refresh = threading.Event()
         self.rpc: Presence | None = None
         self.rpc_id = ""
-        self.started_at = int(time.time())
+        # après une mise à jour ou un redémarrage, le minuteur reprend où il s'était arrêté
+        self.started_at = int(time.time()) - take_resume()
         self.status = "Démarrage…"
 
     def _close(self) -> None:
@@ -315,6 +410,7 @@ SEP = "#34343d"
 ACCENT = "#5865F2"
 OFF = "#585863"
 GREEN = "#43b581"
+RED = "#f23f43"
 
 user32 = ctypes.windll.user32
 dwmapi = ctypes.windll.dwmapi
@@ -402,6 +498,7 @@ class TrayMenu:
                 self._run_tk()
             except Exception:
                 pass
+            gc.collect()  # même raison : libérer les restes Tk dans le thread qui les a créés
             with self.lock:
                 if not any(cmd == "show" for cmd, _ in list(self.q.queue)):
                     self.q = queue.Queue()
@@ -429,6 +526,9 @@ class TrayMenu:
         self.root.destroy()
         self.root = None
         self.logo = None
+        # Les objets Tk doivent être libérés dans CE thread : un gc.collect() lancé ailleurs
+        # (nettoyage mémoire du PresenceWorker) provoquait un « Tcl_AsyncDelete » fatal.
+        gc.collect()
 
     def _poll(self) -> None:
         try:
@@ -456,6 +556,9 @@ class TrayMenu:
         self.win = None
         self.switches = []
         self.type_buttons = []
+        self.redraws = []
+        # aucune référence à un widget ne doit survivre au thread Tk qui l'a créé
+        self.panel = self.panel_text = self.panel_buttons = self.panel_anchor = None
         self.status_label = None
 
     def _close_if_click_outside(self) -> None:
@@ -477,6 +580,8 @@ class TrayMenu:
         w.attributes("-topmost", True)
         w.configure(bg=BG)
         self.win = w
+        self.pos = pos
+        self.update_panel = False
 
         body = tk.Frame(w, bg=BG)
         body.pack(fill="both", expand=True, padx=int(6 * s), pady=int(6 * s))
@@ -501,14 +606,14 @@ class TrayMenu:
         self._separator(body)
         self._type_selector(body)
         self._separator(body)
-        if uninstaller_path() is not None:
-            self._row(body, "", "Désinstaller…", app.uninstall)
+        self._actions(body)
+        self._separator(body)
         self._row(body, "", "Quitter", app.quit)
 
         self._update_state()
         self._place(w, pos)
 
-    def _place(self, w: tk.Toplevel, pos: tuple[int, int]) -> None:
+    def _reposition(self, w: tk.Toplevel, pos: tuple[int, int]) -> None:
         w.update_idletasks()
         width, height = w.winfo_reqwidth(), w.winfo_reqheight()
         left, top, right, bottom = _work_area(*pos)
@@ -521,6 +626,9 @@ class TrayMenu:
         else:
             y = min(max(pos[1] - height // 2, top + margin), bottom - height - margin)
         w.geometry(f"+{x}+{y}")
+
+    def _place(self, w: tk.Toplevel, pos: tuple[int, int]) -> None:
+        self._reposition(w, pos)
         w.deiconify()
         w.lift()
         try:  # coins arrondis + liseré discret (Windows 11) + fond acrylique
@@ -572,6 +680,133 @@ class TrayMenu:
             widget.bind("<Enter>", lambda _e: paint(HOVER))
             widget.bind("<Leave>", lambda _e: paint(BG))
             widget.bind("<Button-1>", on_click)
+
+    # --- petits boutons : Redémarrer / Mise à jour / Désinstaller ---
+    def _button(self, parent, text: str, command, glyph: str = "", primary: bool = False,
+                badge=lambda: False, width: int = 0) -> tk.Canvas:
+        """Petit bouton arrondi (contour discret, ou plein pour l'action principale)."""
+        s = self.s
+        H = int(30 * s)
+        cv = tk.Canvas(parent, height=H, width=width or int(10 * s), bg=BG,
+                       highlightthickness=0, cursor="hand2")
+        state = {"hover": False}
+        label_font = ("Segoe UI", 8)
+
+        def draw(_e=None) -> None:
+            W = cv.winfo_width() if cv.winfo_width() > 1 else (width or int(88 * s))
+            cv.delete("all")
+            r = int(9 * s)
+            x1, y1, x2, y2 = 1, 1, W - 2, H - 2
+            pts = [x1 + r, y1, x2 - r, y1, x2, y1, x2, y1 + r, x2, y2 - r, x2, y2,
+                   x2 - r, y2, x1 + r, y2, x1, y2, x1, y2 - r, x1, y1 + r, x1, y1]
+            if primary:
+                fill = "#4752c4" if state["hover"] else ACCENT
+                outline = fill
+            else:
+                fill = HOVER if state["hover"] else BG
+                outline = SEP
+            cv.create_polygon(pts, smooth=True, fill=fill, outline=outline)
+            if glyph:
+                tw = _text_width(cv, text, label_font)
+                gw = int(16 * s)
+                x0 = (W - tw - gw) / 2
+                cv.create_text(x0 + gw / 2 - 2 * s, H / 2, text=glyph,
+                               font=(self.icon_font, 9), fill=FG)
+                cv.create_text(x0 + gw, H / 2, text=text, font=label_font, fill=FG, anchor="w")
+            else:
+                cv.create_text(W / 2, H / 2, text=text, font=label_font,
+                               fill="white" if primary else FG)
+            if badge():  # pastille : mise à jour disponible
+                d = int(8 * s)
+                x2, y1 = W - int(2 * s), int(1 * s)
+                cv.create_oval(x2 - d, y1, x2, y1 + d, fill=RED, outline=BG, width=max(1, int(s)))
+
+        def hover(on: bool) -> None:
+            state["hover"] = on
+            draw()
+
+        cv.bind("<Configure>", draw)
+        cv.bind("<Enter>", lambda _e: hover(True))
+        cv.bind("<Leave>", lambda _e: hover(False))
+        cv.bind("<Button-1>", lambda _e: command())
+        # pas d'attribut sur le widget (cycle de références) : la fonction de dessin est
+        # gardée par le menu et oubliée à sa fermeture
+        self.redraws.append(draw)
+        return cv
+
+    def _actions(self, parent: tk.Frame) -> None:
+        s = self.s
+        app = self.app
+        bar = tk.Frame(parent, bg=BG)
+        bar.pack(fill="x", padx=int(6 * s), pady=int(2 * s))
+        items = [("\ue72c", "Redémarrer", lambda: (self._close(), app.restart()), lambda: False),
+                 ("\ue896", "Mise à jour", self._on_update, lambda: app.update_info is not None)]
+        if uninstaller_path() is not None:
+            items.append(("\ue74d", "Désinstaller", lambda: (self._close(), app.uninstall()),
+                          lambda: False))
+        for glyph, text, command, badge in items:
+            btn = self._button(bar, text, command, glyph=glyph, badge=badge)
+            btn.pack(side="left", fill="x", expand=True, padx=int(2 * s))
+
+        # zone d'information / de confirmation de la mise à jour (masquée par défaut)
+        self.panel = tk.Frame(parent, bg=BG)
+        self.panel_text = tk.Label(self.panel, bg=BG, fg=FG, font=("Segoe UI", 9),
+                                   justify="left", anchor="w", wraplength=int(260 * s))
+        self.panel_text.pack(fill="x", padx=int(10 * s), pady=(int(6 * s), int(4 * s)))
+        self.panel_buttons = tk.Frame(self.panel, bg=BG)
+        later = self._button(self.panel_buttons, "Plus tard", self._hide_panel, width=int(90 * s))
+        later.pack(side="right", padx=int(2 * s))
+        install = self._button(self.panel_buttons, "Installer", self._confirm_update,
+                               primary=True, width=int(90 * s))
+        install.pack(side="right", padx=int(2 * s))
+        self.panel_anchor = bar
+        self.panel_sig = None
+
+    def _on_update(self) -> None:
+        self.update_panel = True
+        if self.app.update_state not in ("available", "downloading"):
+            self.app.check_updates()  # recherche uniquement sur demande (ou au lancement)
+        self._update_state()
+
+    def _confirm_update(self) -> None:
+        self.app.install_update()
+        self._update_state()
+
+    def _hide_panel(self) -> None:
+        self.update_panel = False
+        self._update_state()
+
+    def _refresh_panel(self) -> None:
+        if self.panel is None:
+            return
+        app = self.app
+        info = app.update_info or {}
+        texts = {
+            "checking": "Recherche d'une mise à jour…",
+            "uptodate": f"Tu as déjà la dernière version (v{APP_VERSION}).",
+            "error": "Impossible de vérifier ou de télécharger la mise à jour. "
+                     "Réessaie plus tard.",
+            "available": f"La version {info.get('version', '')} est disponible "
+                         f"(tu as la {APP_VERSION}). L'installer maintenant ?",
+            "downloading": "Téléchargement de la mise à jour… L'application redémarrera "
+                           "toute seule.",
+        }
+        visible = self.update_panel and app.update_state in texts
+        sig = (visible, app.update_state if visible else None)
+        if sig == self.panel_sig:
+            return
+        self.panel_sig = sig
+        if visible:
+            self.panel_text.configure(text=texts[app.update_state])
+            if app.update_state == "available":
+                self.panel_buttons.pack(fill="x", padx=int(6 * self.s),
+                                        pady=(0, int(6 * self.s)))
+            else:
+                self.panel_buttons.pack_forget()
+            self.panel.pack(fill="x", after=self.panel_anchor)
+        else:
+            self.panel.pack_forget()
+        self._reposition(self.win, self.pos)
 
     def _type_selector(self, parent: tk.Frame) -> None:
         """Choix « Joue / Écoute / Regarde / Participe » en boutons arrondis."""
@@ -644,11 +879,22 @@ class TrayMenu:
                 self._draw_pill(cv, text, value, False)
             except tk.TclError:
                 pass
+        try:
+            for redraw in self.redraws:
+                redraw()
+            self._refresh_panel()
+        except tk.TclError:
+            pass
         if self.status_label is not None:
             status = self.app.worker.status
             self.status_label.configure(
                 text=("● " if status == "Active" else "○ ") + status,
                 fg=GREEN if status == "Active" else MUTED)
+
+
+def _text_width(widget, text: str, font) -> int:
+    from tkinter import font as tkfont
+    return tkfont.Font(root=widget, font=font).measure(text)
 
 
 # --- application ---------------------------------------------------------------
@@ -658,6 +904,9 @@ class App:
         self.cfg = load_config()
         self.cfg_mtime = config_mtime()
         self.worker = PresenceWorker(self)
+        # idle, checking, uptodate, available, downloading, error
+        self.update_state = "idle"
+        self.update_info: dict | None = None
         self.menu = TrayMenu(self)
         self.icon = TrayIcon(
             APP_NAME, make_icon(self.cfg["enabled"]), APP_NAME,
@@ -678,8 +927,56 @@ class App:
         self.menu.refresh()
 
     def update_tooltip(self) -> None:
-        self.icon.title = f"{APP_NAME} — {self.worker.status}"
+        title = f"{APP_NAME} — {self.worker.status}"
+        if self.update_info is not None:
+            title += f"\nMise à jour disponible : v{self.update_info['version']}"
+        self.icon.title = title
         self.menu.refresh()
+
+    # --- mises à jour : recherche au lancement et au clic, jamais en tâche de fond ---
+    def check_updates(self) -> None:
+        if self.update_state in ("checking", "downloading"):
+            return
+        self.update_state = "checking"
+        self.menu.refresh()
+        threading.Thread(target=self._check_updates, daemon=True).start()
+
+    def _check_updates(self) -> None:
+        try:
+            self.update_info = fetch_latest_release()
+            self.update_state = "available" if self.update_info else "uptodate"
+        except Exception:
+            self.update_state = "error"
+        self.update_tooltip()
+        trim_memory()
+
+    def install_update(self) -> None:
+        if self.update_info is None or self.update_state == "downloading":
+            return
+        self.update_state = "downloading"
+        self.menu.refresh()
+        threading.Thread(target=self._install_update, daemon=True).start()
+
+    def _install_update(self) -> None:
+        try:
+            setup = download_setup(self.update_info)
+        except Exception:
+            self.update_state = "error"
+            self.menu.refresh()
+            return
+        # l'installateur ferme l'application si besoin, met à jour puis la relance
+        save_resume(self.worker.started_at)
+        subprocess.Popen([str(setup), "/SILENT", "/SUPPRESSMSGBOXES", "/NORESTART"],
+                         close_fds=True)
+        self.quit()
+
+    def restart(self, *_: object) -> None:
+        cmd = [sys.executable] if getattr(sys, "frozen", False) else [
+            sys.executable, str(Path(__file__).resolve())]
+        env = dict(os.environ, PYINSTALLER_RESET_ENVIRONMENT="1")
+        save_resume(self.worker.started_at)
+        subprocess.Popen(cmd + ["--restart"], close_fds=True, env=env)
+        self.quit()
 
     def toggle_presence(self, *_: object) -> None:
         self.cfg["enabled"] = not self.cfg["enabled"]
@@ -714,17 +1011,31 @@ class App:
         self.worker.start()
         if not str(self.cfg.get("client_id") or "").strip():
             threading.Timer(1.0, self.open_config).start()
+        threading.Timer(5.0, self.check_updates).start()  # une seule recherche au lancement
         self.icon.run()
 
 
-def _already_running() -> bool:
-    """Une seule instance à la fois (mutex nommé, aussi utilisé par l'installateur)."""
+def _already_running(wait: float = 0) -> bool:
+    """Une seule instance à la fois (mutex nommé, aussi utilisé par l'installateur).
+
+    `wait` : délai pendant lequel on attend la fermeture de l'instance précédente
+    (redémarrage depuis le menu).
+    """
     kernel32 = ctypes.windll.kernel32
     kernel32.CreateMutexW.restype = ctypes.c_void_p
-    _already_running.handle = kernel32.CreateMutexW(None, False, "NakaPresenceMutex")
-    return kernel32.GetLastError() == 183  # ERROR_ALREADY_EXISTS
+    kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+    deadline = time.time() + wait
+    while True:
+        handle = kernel32.CreateMutexW(None, False, MUTEX_NAME)
+        if kernel32.GetLastError() != 183:  # ERROR_ALREADY_EXISTS
+            _already_running.handle = handle
+            return False
+        kernel32.CloseHandle(handle)
+        if time.time() >= deadline:
+            return True
+        time.sleep(0.25)
 
 
 if __name__ == "__main__":
-    if not _already_running():
+    if not _already_running(wait=15 if "--restart" in sys.argv else 0):
         App().run()

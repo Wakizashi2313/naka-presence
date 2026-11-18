@@ -9,4 +9,5 @@ if (-not (Test-Path .venv)) { python -m venv .venv }
 $iscc = @("$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe", "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe") |
     Where-Object { Test-Path $_ } | Select-Object -First 1
 if (-not $iscc) { throw "Inno Setup introuvable" }
-& $iscc installer.iss
+$version = (Select-String -Path naka_presence.py -Pattern '^APP_VERSION = "(.+?)"').Matches[0].Groups[1].Value
+& $iscc "/DAppVersion=$version" installer.iss

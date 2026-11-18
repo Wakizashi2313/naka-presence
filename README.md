@@ -20,10 +20,11 @@
 
 ## Fonctionnalités
 
-- **Présence Discord** avec la description du serveur, un minuteur et un bouton « Rejoindre le serveur ».
+- **Présence Discord** avec la description du serveur, un minuteur et deux boutons : « Visiter le site » et « Rejoindre le serveur ».
 - **Icône dans la zone de notification** : double-clic pour activer ou désactiver, clic droit pour le menu.
 - **Type d'affichage au choix** : Joue, Écoute, Regarde ou Participe.
 - **Démarrage avec Windows** en option.
+- **Mises à jour intégrées** : recherche au lancement ou sur demande, pastille quand une version est disponible, installation après confirmation.
 - **Légère** : quelques Mo de mémoire au repos.
 - **Désinstallation propre** : rien ne reste sur le système.
 
@@ -50,7 +51,9 @@
 | Double-clic sur l'icône | Active ou désactive la présence |
 | Clic droit sur l'icône | Ouvre le menu |
 | Menu → Affichage sur le profil | Choisit « Joue », « Écoute », « Regarde » ou « Participe » |
-| Menu → Désinstaller… | Supprime l'application et tous ses fichiers |
+| Menu → Mise à jour | Cherche une nouvelle version et propose de l'installer |
+| Menu → Redémarrer | Relance l'application |
+| Menu → Désinstaller | Supprime l'application et tous ses fichiers |
 
 Discord n'affiche qu'une mise à jour de présence toutes les 15 secondes environ. Deux changements rapprochés peuvent donc mettre quelques secondes à apparaître.
 
@@ -68,7 +71,7 @@ Les réglages sont dans `%APPDATA%\NakaPresence\config.json` et sont pris en com
 
 ## Désinstallation
 
-Depuis le menu (**Désinstaller…**) ou depuis **Paramètres Windows → Applications installées**. Sont supprimés :
+Depuis le menu (**Désinstaller**) ou depuis **Paramètres Windows → Applications installées**. Sont supprimés :
 
 - le dossier de l'application (`%LOCALAPPDATA%\Programs\NAKA Presence`) ;
 - la configuration (`%APPDATA%\NakaPresence`) ;
