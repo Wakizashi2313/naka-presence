@@ -1,0 +1,99 @@
+# Paquets Linux : construits, installés et lancés sur Debian et Fedora, puis joints à la release.
+name: Linux
+
+on:
+  push:
+    branches: [main, linux]
+    paths: ["naka_presence.py", "packaging/linux/**", "requirements.txt", ".github/workflows/linux.yml"]
+  workflow_dispatch:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-go@v7.1.0
+        with:
+          go-version: stable
+          cache: false
+      - name: nfpm
+        run: go install github.com/goreleaser/nfpm/v2/cmd/nfpm@v2.48.0 && echo "$HOME/go/bin" >> "$GITHUB_PATH"
+      - name: Paquets
+        run: sh packaging/linux/build.sh
+      - uses: actions/upload-artifact@v7.0.2
+        with:
+          name: paquets-linux
+          path: |
+            dist/*.deb
+            dist/*.rpm
+
+  test:
+    needs: build
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        image: ["debian:12", "debian:13", "fedora:latest"]
+    container: ${{ matrix.image }}
+    steps:
+      - uses: actions/download-artifact@v8.0.2
+        with:
+          name: paquets-linux
+          path: dist
+      - name: Installation du paquet (dépendances comprises)
+        run: |
+          if command -v apt-get >/dev/null; then
+            apt-get update -qq
+            DEBIAN_FRONTEND=noninteractive apt-get install -y -qq ./dist/*.deb \
+              xvfb xauth dbus-x11 imagemagick fonts-dejavu-core >/dev/null
+          else
+            dnf install -y -q ./dist/*.rpm xorg-x11-server-Xvfb xorg-x11-xauth dbus-daemon dbus-tools \
+              ImageMagick dejavu-sans-fonts which
+          fi
+          command -v naka-presence
+          test -f /usr/share/applications/naka-presence.desktop
+      - name: Lancement (écran virtuel) et capture du menu
+        run: |
+          python3 -m py_compile /usr/lib/naka-presence/naka_presence.py
+          dbus-run-session -- xvfb-run -a -s "-screen 0 1280x800x24" sh -c '
+            naka-presence --selftest > selftest.log 2>&1 & pid=$!
+            sleep 3; import -window root menu.png
+            wait $pid; echo "code=$?" >> selftest.log'
+          cat selftest.log
+          grep -q "menu ouvert : True" selftest.log
+          grep -q "code=0" selftest.log
+      - name: Désinstallation
+        run: |
+          if command -v apt-get >/dev/null; then apt-get remove -y -qq naka-presence; else dnf remove -y -q naka-presence; fi
+          test ! -e /usr/bin/naka-presence
+      - name: Nom de la capture
+        if: always()
+        run: echo "SHOT=capture-$(echo '${{ matrix.image }}' | tr ':' '-')" >> "$GITHUB_ENV"
+      - uses: actions/upload-artifact@v7.0.2
+        if: always()
+        with:
+          name: ${{ env.SHOT }}
+          path: |
+            menu.png
+            selftest.log
+
+  release:
+    if: github.event_name == 'release'
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8.0.2
+        with:
+          name: paquets-linux
+          path: dist
+      - name: Paquets joints à la release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${{ github.event.release.tag_name }}" dist/*.deb dist/*.rpm --clobber --repo "${{ github.repository }}"

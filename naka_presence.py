@@ -1,18 +1,33 @@
-"""NAKA Presence : Rich Presence Discord pilotée depuis la zone de notification Windows."""
+"""NAKA Presence : Rich Presence Discord pilotée depuis la zone de notification (Windows, Linux)."""
 from __future__ import annotations
 
 import ctypes
 import json
 import os
 import queue
+import socket
 import subprocess
 import sys
 import threading
 import gc
 import time
-import winreg
-from ctypes import wintypes
 from pathlib import Path
+
+IS_WIN = sys.platform == "win32"
+if IS_WIN:
+    import winreg
+    from ctypes import wintypes
+
+# Paquets Linux : pystray et pypresence sont fournis à côté du programme (/usr/lib/naka-presence/vendor)
+_VENDOR = Path(__file__).resolve().parent / "vendor"
+if _VENDOR.is_dir():
+    sys.path.insert(0, str(_VENDOR))
+
+if not IS_WIN:
+    try:  # GTK (icône) et Tk (menu) parlent au serveur X depuis deux threads
+        ctypes.CDLL("libX11.so.6").XInitThreads()
+    except OSError:
+        pass
 
 import pystray
 from PIL import Image, ImageOps
@@ -25,10 +40,13 @@ def trim_memory() -> None:
     """Rend au système la mémoire inutilisée du processus."""
     gc.collect()
     try:
-        kernel32 = ctypes.windll.kernel32
-        kernel32.GetCurrentProcess.restype = ctypes.c_void_p
-        ctypes.windll.psapi.EmptyWorkingSet.argtypes = [ctypes.c_void_p]
-        ctypes.windll.psapi.EmptyWorkingSet(kernel32.GetCurrentProcess())
+        if IS_WIN:
+            kernel32 = ctypes.windll.kernel32
+            kernel32.GetCurrentProcess.restype = ctypes.c_void_p
+            ctypes.windll.psapi.EmptyWorkingSet.argtypes = [ctypes.c_void_p]
+            ctypes.windll.psapi.EmptyWorkingSet(kernel32.GetCurrentProcess())
+        else:
+            ctypes.CDLL("libc.so.6").malloc_trim(0)  # glibc : rend les pages libres au système
     except Exception:
         pass
 
@@ -40,7 +58,13 @@ SETUP_ASSET = "NakaPresence-Setup.exe"
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 RUN_VALUE = "NakaPresence"
 
-CONFIG_DIR = Path(os.environ.get("APPDATA", Path.home())) / "NakaPresence"
+if IS_WIN:
+    CONFIG_DIR = Path(os.environ.get("APPDATA", Path.home())) / "NakaPresence"
+else:
+    CONFIG_DIR = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "naka-presence"
+# installé par le paquet .deb / .rpm (sinon : lancé depuis les sources)
+LINUX_APP_DIR = Path("/usr/lib/naka-presence")
+LINUX_PACKAGED = not IS_WIN and Path(__file__).resolve().parent == LINUX_APP_DIR
 CONFIG_FILE = CONFIG_DIR / "config.json"
 # minuteur mis de côté pendant une mise à jour ou un redémarrage
 RESUME_FILE = CONFIG_DIR / "resume.json"
@@ -95,21 +119,37 @@ OLD_DEFAULT_BUTTONS = [{"label": "Rejoindre le serveur", "url": "https://discord
 # type d'activité Discord -> libellé affiché dans le menu
 ACTIVITY_TYPES = [(0, "Joue"), (2, "Écoute"), (3, "Regarde"), (5, "Participe")]
 
-# accès rapide aux pages du serveur : (icône Segoe Fluent, libellé, adresse)
+# icônes du menu : (Segoe Fluent Icons sous Windows, symbole Unicode ailleurs)
+GLYPHS = {
+    "presence": ("\ue768", "▶"), "autostart": ("\ue895", "◷"), "music": ("\ue8d6", "♫"),
+    "quit": ("\ue7e8", "✕"), "site": ("\ue774", "⌂"), "headphones": ("\ue7f6", "♪"),
+    "stats": ("\ue9d2", "▤"), "restart": ("\ue72c", "↻"), "update": ("\ue896", "⇩"),
+    "uninstall": ("\ue74d", "✕"),
+}
+
+
+def glyph(name: str) -> str:
+    return GLYPHS[name][0 if IS_WIN else 1]
+
+
+AUTOSTART_LABEL = "Démarrer avec Windows" if IS_WIN else "Démarrer avec la session"
+
+# accès rapide aux pages du serveur : (icône, libellé, adresse)
 GUILD_ID = "1500775639706370151"
 QUICK_LINKS = [
-    ("", "Site", "https://naka-discord.fr/"),                                # globe
-    ("", "Musique", f"https://musique.naka-discord.fr/g/{GUILD_ID}"),       # casque
-    ("", "Stats", f"https://stats.naka-discord.fr/g/{GUILD_ID}"),           # graphique
+    ("site", "Site", "https://naka-discord.fr/"),
+    ("headphones", "Musique", f"https://musique.naka-discord.fr/g/{GUILD_ID}"),
+    ("stats", "Stats", f"https://stats.naka-discord.fr/g/{GUILD_ID}"),
 ]
 
 WM_LBUTTONDBLCLK = 0x0203
 WM_RBUTTONUP = 0x0205
 
-try:  # netteté du menu sur écrans à forte densité
-    ctypes.windll.shcore.SetProcessDpiAwareness(2)
-except Exception:
-    pass
+if IS_WIN:
+    try:  # netteté du menu sur écrans à forte densité
+        ctypes.windll.shcore.SetProcessDpiAwareness(2)
+    except Exception:
+        pass
 
 
 def load_config() -> dict:
@@ -140,15 +180,30 @@ def config_mtime() -> int:
         return 0
 
 
-# --- démarrage avec Windows (clé HKCU, supprimée à la désinstallation) ---------
+# --- démarrage avec la session -----------------------------------------------------
+# Windows : clé HKCU\…\Run (supprimée à la désinstallation).
+# Linux : fichier .desktop dans ~/.config/autostart (norme XDG : GNOME, KDE, Xfce…).
+
+AUTOSTART_FILE = (Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config")
+                  / "autostart" / "naka-presence.desktop")
+
+
+def _command() -> list[str]:
+    """Commande qui relance l'application."""
+    if getattr(sys, "frozen", False):
+        return [sys.executable]
+    if LINUX_PACKAGED:
+        return ["/usr/bin/naka-presence"]
+    return [sys.executable, str(Path(__file__).resolve())]
+
 
 def _exe_command() -> str:
-    if getattr(sys, "frozen", False):
-        return f'"{sys.executable}"'
-    return f'"{sys.executable}" "{Path(__file__).resolve()}"'
+    return " ".join(f'"{part}"' for part in _command())
 
 
 def autostart_enabled() -> bool:
+    if not IS_WIN:
+        return AUTOSTART_FILE.exists()
     try:
         with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY) as key:
             winreg.QueryValueEx(key, RUN_VALUE)
@@ -158,6 +213,16 @@ def autostart_enabled() -> bool:
 
 
 def set_autostart(on: bool) -> None:
+    if not IS_WIN:
+        if on:
+            AUTOSTART_FILE.parent.mkdir(parents=True, exist_ok=True)
+            AUTOSTART_FILE.write_text(
+                "[Desktop Entry]\nType=Application\nName=NAKA Presence\n"
+                f"Exec={_exe_command()}\nIcon=naka-presence\nTerminal=false\n"
+                "X-GNOME-Autostart-enabled=true\n", encoding="utf-8")
+        else:
+            AUTOSTART_FILE.unlink(missing_ok=True)
+        return
     with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY, 0, winreg.KEY_SET_VALUE) as key:
         if on:
             winreg.SetValueEx(key, RUN_VALUE, 0, winreg.REG_SZ, _exe_command())
@@ -187,8 +252,8 @@ def make_icon(active: bool) -> Image.Image:
 
 
 def uninstaller_path() -> Path | None:
-    if not getattr(sys, "frozen", False):
-        return None
+    if not IS_WIN or not getattr(sys, "frozen", False):
+        return None  # Linux : désinstallation par le gestionnaire de paquets
     path = Path(sys.executable).parent / "unins000.exe"
     return path if path.exists() else None
 
@@ -212,25 +277,60 @@ def _http_get(url: str, timeout: float = 15):
     return urllib.request.urlopen(req, timeout=timeout)
 
 
+def linux_package_format() -> str | None:
+    """« deb » (Debian, Ubuntu…) ou « rpm » (Fedora…) pour une installation par paquet."""
+    if not LINUX_PACKAGED:
+        return None
+    try:
+        info = Path("/etc/os-release").read_text(encoding="utf-8").lower()
+    except OSError:
+        info = ""
+    ids = " ".join(line.split("=", 1)[1].strip('"') for line in info.splitlines()
+                   if line.startswith(("id=", "id_like=")))
+    if any(name in ids for name in ("debian", "ubuntu")) or Path("/usr/bin/apt-get").exists():
+        return "deb"
+    if any(name in ids for name in ("fedora", "rhel", "centos")) or Path("/usr/bin/dnf").exists():
+        return "rpm"
+    return None
+
+
+def _wanted_asset(name: str) -> bool:
+    if IS_WIN:
+        return name == SETUP_ASSET
+    fmt = linux_package_format()
+    return bool(fmt) and name.startswith("naka-presence") and name.endswith(f".{fmt}")
+
+
 def fetch_latest_release() -> dict | None:
-    """Renvoie {version, url, digest} si une version plus récente existe, sinon None."""
+    """Renvoie {version, url, digest, page} si une version plus récente existe, sinon None.
+
+    `url` est vide quand la mise à jour ne peut pas s'installer d'ici (lancé depuis les
+    sources sous Linux) : on propose alors la page de la release.
+    """
     with _http_get(f"https://api.github.com/repos/{REPO}/releases/latest") as resp:
         data = json.loads(resp.read().decode("utf-8"))
     version = str(data.get("tag_name", "")).lstrip("vV")
     if not version or _version_tuple(version) <= _version_tuple(APP_VERSION):
         return None
+    info = {"version": version, "url": "", "digest": "", "name": "",
+            "page": str(data.get("html_url") or f"https://github.com/{REPO}/releases/latest")}
     for asset in data.get("assets", []):
-        if asset.get("name") == SETUP_ASSET:
-            return {"version": version, "url": asset["browser_download_url"],
-                    "digest": str(asset.get("digest") or "")}
-    return None
+        if _wanted_asset(str(asset.get("name", ""))):
+            info.update(url=asset["browser_download_url"], digest=str(asset.get("digest") or ""),
+                        name=str(asset["name"]))
+            return info
+    if IS_WIN:
+        return None  # release sans installateur Windows : rien à proposer
+    return info
 
 
 def download_setup(info: dict) -> Path:
     """Télécharge l'installateur dans %TEMP% et vérifie son empreinte SHA-256."""
     import hashlib
     import tempfile
-    target = Path(tempfile.gettempdir()) / f"NakaPresence-Setup-{info['version']}.exe"
+    name = info.get("name") or SETUP_ASSET
+    stem, dot, ext = name.rpartition(".")
+    target = Path(tempfile.gettempdir()) / f"{stem}-{info['version']}{dot}{ext}"
     sha = hashlib.sha256()
     tmp = target.with_suffix(".part")
     with _http_get(info["url"], timeout=60) as resp, open(tmp, "wb") as out:
@@ -243,7 +343,18 @@ def download_setup(info: dict) -> Path:
         raise ValueError("empreinte SHA-256 incorrecte")
     target.unlink(missing_ok=True)
     tmp.rename(target)
+    if not IS_WIN:
+        target.chmod(0o644)  # lisible par apt / dnf (root)
     return target
+
+
+def open_target(target: str) -> None:
+    """Ouvre une adresse ou un fichier avec l'application par défaut."""
+    if IS_WIN:
+        os.startfile(target)  # type: ignore[attr-defined]
+    else:
+        subprocess.Popen(["xdg-open", str(target)], close_fds=True,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
 # --- musique du salon vocal (API de NakaBOT sur le site du lecteur) ----------------
@@ -568,8 +679,8 @@ class TrayIcon(pystray.Icon):
 
 # --- menu stylisé (tkinter, thread dédié) ----------------------------------------
 
-# Noir pur = « verre » : le fond du menu laisse voir l'effet acrylique de Windows.
-BG = "#000000"
+# Windows : noir pur = « verre », le fond laisse voir l'effet acrylique. Linux : fond uni.
+BG = "#000000" if IS_WIN else "#1c1c21"
 HOVER = "#2a2a31"
 TINT = 0xB0211C1C  # teinte du fond acrylique, format AABBGGRR (≈ #1c1c21, 69 % opaque)
 FG = "#f2f2f5"
@@ -580,59 +691,65 @@ OFF = "#585863"
 GREEN = "#43b581"
 RED = "#f23f43"
 
-user32 = ctypes.windll.user32
-dwmapi = ctypes.windll.dwmapi
-user32.GetAncestor.restype = ctypes.c_void_p
-user32.GetAncestor.argtypes = [ctypes.c_void_p, ctypes.c_uint]
-user32.MonitorFromPoint.restype = ctypes.c_void_p
-user32.MonitorFromPoint.argtypes = [wintypes.POINT, wintypes.DWORD]
-user32.GetMonitorInfoW.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
-dwmapi.DwmSetWindowAttribute.argtypes = [
-    ctypes.c_void_p, wintypes.DWORD, ctypes.c_void_p, wintypes.DWORD]
-dwmapi.DwmExtendFrameIntoClientArea.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
-user32.SetWindowCompositionAttribute.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+if IS_WIN:
+    user32 = ctypes.windll.user32
+    dwmapi = ctypes.windll.dwmapi
+    user32.GetAncestor.restype = ctypes.c_void_p
+    user32.GetAncestor.argtypes = [ctypes.c_void_p, ctypes.c_uint]
+    user32.MonitorFromPoint.restype = ctypes.c_void_p
+    user32.MonitorFromPoint.argtypes = [wintypes.POINT, wintypes.DWORD]
+    user32.GetMonitorInfoW.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    dwmapi.DwmSetWindowAttribute.argtypes = [
+        ctypes.c_void_p, wintypes.DWORD, ctypes.c_void_p, wintypes.DWORD]
+    dwmapi.DwmExtendFrameIntoClientArea.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    user32.SetWindowCompositionAttribute.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
 
 
-class _ACCENT(ctypes.Structure):
-    _fields_ = [("state", ctypes.c_int), ("flags", ctypes.c_int),
-                ("color", ctypes.c_uint), ("anim", ctypes.c_int)]
+    class _ACCENT(ctypes.Structure):
+        _fields_ = [("state", ctypes.c_int), ("flags", ctypes.c_int),
+                    ("color", ctypes.c_uint), ("anim", ctypes.c_int)]
 
 
-class _WCAD(ctypes.Structure):
-    _fields_ = [("attr", ctypes.c_int), ("data", ctypes.c_void_p), ("size", ctypes.c_size_t)]
+    class _WCAD(ctypes.Structure):
+        _fields_ = [("attr", ctypes.c_int), ("data", ctypes.c_void_p), ("size", ctypes.c_size_t)]
 
 
-class _MARGINS(ctypes.Structure):
-    _fields_ = [("l", ctypes.c_int), ("r", ctypes.c_int), ("t", ctypes.c_int), ("b", ctypes.c_int)]
+    class _MARGINS(ctypes.Structure):
+        _fields_ = [("l", ctypes.c_int), ("r", ctypes.c_int), ("t", ctypes.c_int), ("b", ctypes.c_int)]
 
 
-def _acrylic(hwnd: int) -> None:
-    """Fond acrylique (flou + transparence) ; suit le réglage « Effets de transparence »."""
-    margins = _MARGINS(-1, -1, -1, -1)
-    dwmapi.DwmExtendFrameIntoClientArea(hwnd, ctypes.byref(margins))
-    accent = _ACCENT(4, 2, TINT, 0)  # ACCENT_ENABLE_ACRYLICBLURBEHIND
-    data = _WCAD(19, ctypes.cast(ctypes.byref(accent), ctypes.c_void_p), ctypes.sizeof(accent))
-    user32.SetWindowCompositionAttribute(hwnd, ctypes.byref(data))
+    def _acrylic(hwnd: int) -> None:
+        """Fond acrylique (flou + transparence) ; suit le réglage « Effets de transparence »."""
+        margins = _MARGINS(-1, -1, -1, -1)
+        dwmapi.DwmExtendFrameIntoClientArea(hwnd, ctypes.byref(margins))
+        accent = _ACCENT(4, 2, TINT, 0)  # ACCENT_ENABLE_ACRYLICBLURBEHIND
+        data = _WCAD(19, ctypes.cast(ctypes.byref(accent), ctypes.c_void_p), ctypes.sizeof(accent))
+        user32.SetWindowCompositionAttribute(hwnd, ctypes.byref(data))
 
 
-class _MONITORINFO(ctypes.Structure):
-    _fields_ = [("cbSize", wintypes.DWORD), ("rcMonitor", wintypes.RECT),
-                ("rcWork", wintypes.RECT), ("dwFlags", wintypes.DWORD)]
+    class _MONITORINFO(ctypes.Structure):
+        _fields_ = [("cbSize", wintypes.DWORD), ("rcMonitor", wintypes.RECT),
+                    ("rcWork", wintypes.RECT), ("dwFlags", wintypes.DWORD)]
 
 
-def _cursor() -> tuple[int, int]:
-    pt = wintypes.POINT()
-    user32.GetCursorPos(ctypes.byref(pt))
-    return pt.x, pt.y
+    def _cursor() -> tuple[int, int] | None:
+        pt = wintypes.POINT()
+        user32.GetCursorPos(ctypes.byref(pt))
+        return pt.x, pt.y
 
 
-def _work_area(x: int, y: int) -> tuple[int, int, int, int]:
-    info = _MONITORINFO()
-    info.cbSize = ctypes.sizeof(info)
-    hmon = user32.MonitorFromPoint(wintypes.POINT(x, y), 2)
-    user32.GetMonitorInfoW(hmon, ctypes.byref(info))
-    r = info.rcWork
-    return r.left, r.top, r.right, r.bottom
+    def _work_area(x: int, y: int) -> tuple[int, int, int, int]:
+        info = _MONITORINFO()
+        info.cbSize = ctypes.sizeof(info)
+        hmon = user32.MonitorFromPoint(wintypes.POINT(x, y), 2)
+        user32.GetMonitorInfoW(hmon, ctypes.byref(info))
+        r = info.rcWork
+        return r.left, r.top, r.right, r.bottom
+
+
+else:
+    def _cursor() -> tuple[int, int] | None:
+        return None  # position lue par Tk à l'ouverture du menu
 
 
 class TrayMenu:
@@ -646,10 +763,10 @@ class TrayMenu:
         self.thread: threading.Thread | None = None
 
     # appelé depuis les autres threads
-    def show(self) -> None:
+    def show(self, update: bool = False) -> None:
         # Tk n'existe que pendant que le menu est ouvert : démarré ici, détruit à la fermeture
         with self.lock:
-            self.q.put(("show", _cursor()))
+            self.q.put(("show", (_cursor(), update)))
             if self.thread is None:
                 self.thread = threading.Thread(target=self._loop, daemon=True)
                 self.thread.start()
@@ -684,7 +801,14 @@ class TrayMenu:
         self.root.withdraw()
         self.s = self.root.winfo_fpixels("1i") / 96
         families = set(tkfont.families(self.root))
-        self.icon_font = "Segoe Fluent Icons" if "Segoe Fluent Icons" in families else "Segoe MDL2 Assets"
+        if IS_WIN:
+            self.ui = "Segoe UI"
+            self.ui_title = ("Segoe UI Semibold", 11)
+            self.icon_font = "Segoe Fluent Icons" if "Segoe Fluent Icons" in families else "Segoe MDL2 Assets"
+        else:  # police de l'interface du bureau ; les symboles viennent du repli de fontconfig
+            self.ui = tkfont.nametofont("TkDefaultFont", root=self.root).actual("family")
+            self.ui_title = (self.ui, 11, "bold")
+            self.icon_font = self.ui
         size = int(40 * self.s)
         self.logo = ImageTk.PhotoImage(
             Image.open(_resource("icon.png")).convert("RGBA").resize((size, size), Image.LANCZOS))
@@ -703,7 +827,10 @@ class TrayMenu:
             while True:
                 cmd, arg = self.q.get_nowait()
                 if cmd == "show":
-                    self._open(arg)
+                    pos, update = arg
+                    self._open(pos or self.root.winfo_pointerxy())
+                    if update:
+                        self._on_update()
                 elif cmd == "refresh":
                     self._update_state()
         except queue.Empty:
@@ -730,6 +857,8 @@ class TrayMenu:
         self.status_label = None
 
     def _close_if_click_outside(self) -> None:
+        if not IS_WIN:
+            return  # Linux : fermeture à la perte du focus (_on_focus_out)
         pressed = any(user32.GetAsyncKeyState(vk) & 0x8000 for vk in (0x01, 0x02, 0x04))
         if not pressed or self.win is None:
             return
@@ -747,6 +876,10 @@ class TrayMenu:
         w.overrideredirect(True)
         w.attributes("-topmost", True)
         w.configure(bg=BG)
+        if not IS_WIN:  # pas d'acrylique ni de coins arrondis : un liseré discret
+            w.configure(highlightthickness=1, highlightbackground=SEP, highlightcolor=SEP)
+            w.bind("<Escape>", lambda _e: self._close())
+            w.bind("<FocusOut>", lambda _e: self.root.after(150, self._on_focus_out))
         self.win = w
         self.pos = pos
         self.update_panel = False
@@ -760,18 +893,18 @@ class TrayMenu:
         tk.Label(header, image=self.logo, bg=BG).pack(side="left")
         texts = tk.Frame(header, bg=BG)
         texts.pack(side="left", padx=int(12 * s))
-        tk.Label(texts, text=APP_NAME, bg=BG, fg=FG, font=("Segoe UI Semibold", 11),
+        tk.Label(texts, text=APP_NAME, bg=BG, fg=FG, font=self.ui_title,
                  anchor="w").pack(fill="x")
-        self.status_label = tk.Label(texts, bg=BG, font=("Segoe UI", 9), anchor="w")
+        self.status_label = tk.Label(texts, bg=BG, font=(self.ui, 9), anchor="w")
         self.status_label.pack(fill="x")
 
         self._separator(body)
         app = self.app
-        self._row(body, "", "Présence Discord", app.toggle_presence,
+        self._row(body, glyph("presence"), "Présence Discord", app.toggle_presence,
                   lambda: app.cfg["enabled"], keep_open=True)
-        self._row(body, "", "Démarrer avec Windows", app.toggle_autostart,
+        self._row(body, glyph("autostart"), AUTOSTART_LABEL, app.toggle_autostart,
                   autostart_enabled, keep_open=True)
-        self._row(body, "", "Musique du salon vocal", app.toggle_music,
+        self._row(body, glyph("music"), "Musique du salon vocal", app.toggle_music,
                   lambda: bool(app.cfg.get("music_presence")), keep_open=True)
         self._separator(body)
         self._type_selector(body)
@@ -780,7 +913,7 @@ class TrayMenu:
         self._separator(body)
         self._actions(body)
         self._separator(body)
-        self._row(body, "", "Quitter", app.quit)
+        self._row(body, glyph("quit"), "Quitter", app.quit)
 
         self._update_state()
         self._place(w, pos)
@@ -788,7 +921,18 @@ class TrayMenu:
     def _reposition(self, w: tk.Toplevel, pos: tuple[int, int]) -> None:
         w.update_idletasks()
         width, height = w.winfo_reqwidth(), w.winfo_reqheight()
-        left, top, right, bottom = _work_area(*pos)
+        if IS_WIN:
+            left, top, right, bottom = _work_area(*pos)
+        else:  # écran entier ; la barre du haut (GNOME) ou du bas est évitée ci-dessous
+            left, top = 0, 0
+            right, bottom = w.winfo_screenwidth(), w.winfo_screenheight()
+            bar = int(40 * self.s)
+            if pos[1] < bottom // 2:
+                pos = (pos[0], top)
+                top += bar
+            else:
+                pos = (pos[0], bottom)
+                bottom -= bar
         margin = int(8 * self.s)
         x = min(max(pos[0] - width // 2, left + margin), right - width - margin)
         if pos[1] >= bottom - 1:          # barre des tâches en bas
@@ -803,6 +947,9 @@ class TrayMenu:
         self._reposition(w, pos)
         w.deiconify()
         w.lift()
+        if not IS_WIN:
+            w.focus_force()
+            return
         try:  # coins arrondis + liseré discret (Windows 11) + fond acrylique
             hwnd = user32.GetAncestor(w.winfo_id(), 2)
             dwmapi.DwmSetWindowAttribute(hwnd, 33, ctypes.byref(ctypes.c_int(2)), 4)
@@ -810,6 +957,17 @@ class TrayMenu:
             _acrylic(hwnd)
         except Exception:
             pass
+
+    def _on_focus_out(self) -> None:
+        """Linux : un clic ailleurs retire le focus au menu, qui se ferme alors."""
+        if self.win is None:
+            return
+        try:
+            focus = self.win.focus_get()
+        except (KeyError, tk.TclError):
+            focus = None
+        if focus is None or not str(focus).startswith(str(self.win)):
+            self._close()
 
     def _separator(self, parent: tk.Frame) -> None:
         tk.Frame(parent, bg=SEP, height=1).pack(fill="x", pady=int(4 * self.s), padx=int(6 * self.s))
@@ -822,7 +980,7 @@ class TrayMenu:
         row.pack_propagate(False)
         icon = tk.Label(row, text=glyph, font=(self.icon_font, 12), bg=BG, fg=FG)
         icon.pack(side="left", padx=int(12 * s))
-        label = tk.Label(row, text=text, font=("Segoe UI", 10), bg=BG, fg=FG, anchor="w")
+        label = tk.Label(row, text=text, font=(self.ui, 10), bg=BG, fg=FG, anchor="w")
         label.pack(side="left", fill="x", expand=True)
         widgets = [row, icon, label]
         switch = None
@@ -862,7 +1020,7 @@ class TrayMenu:
         cv = tk.Canvas(parent, height=H, width=width or int(10 * s), bg=BG,
                        highlightthickness=0, cursor="hand2")
         state = {"hover": False}
-        label_font = ("Segoe UI", 8)
+        label_font = (self.ui, 8)
 
         def draw(_e=None) -> None:
             W = cv.winfo_width() if cv.winfo_width() > 1 else (width or int(88 * s))
@@ -909,15 +1067,15 @@ class TrayMenu:
     def _quick_links(self, parent: tk.Frame) -> None:
         """Site / Musique / Stats : ouvre la page dans le navigateur et ferme le menu."""
         s = self.s
-        tk.Label(parent, text="Accès rapide", bg=BG, fg=MUTED, font=("Segoe UI", 9),
+        tk.Label(parent, text="Accès rapide", bg=BG, fg=MUTED, font=(self.ui, 9),
                  anchor="w").pack(fill="x", padx=int(12 * s), pady=(int(2 * s), int(4 * s)))
         bar = tk.Frame(parent, bg=BG)
         bar.pack(fill="x", padx=int(6 * s), pady=(0, int(4 * s)))
-        for glyph, text, url in QUICK_LINKS:
+        for icon, text, url in QUICK_LINKS:
             def open_page(u=url) -> None:
                 self._close()
-                os.startfile(u)  # type: ignore[attr-defined]  (navigateur par défaut)
-            self._button(bar, text, open_page, glyph=glyph).pack(
+                open_target(u)  # navigateur par défaut
+            self._button(bar, text, open_page, glyph=glyph(icon)).pack(
                 side="left", fill="x", expand=True, padx=int(2 * s))
 
     def _actions(self, parent: tk.Frame) -> None:
@@ -925,18 +1083,18 @@ class TrayMenu:
         app = self.app
         bar = tk.Frame(parent, bg=BG)
         bar.pack(fill="x", padx=int(6 * s), pady=int(2 * s))
-        items = [("\ue72c", "Redémarrer", lambda: (self._close(), app.restart()), lambda: False),
-                 ("\ue896", "Mise à jour", self._on_update, lambda: app.update_info is not None)]
+        items = [("restart", "Redémarrer", lambda: (self._close(), app.restart()), lambda: False),
+                 ("update", "Mise à jour", self._on_update, lambda: app.update_info is not None)]
         if uninstaller_path() is not None:
-            items.append(("\ue74d", "Désinstaller", lambda: (self._close(), app.uninstall()),
+            items.append(("uninstall", "Désinstaller", lambda: (self._close(), app.uninstall()),
                           lambda: False))
-        for glyph, text, command, badge in items:
-            btn = self._button(bar, text, command, glyph=glyph, badge=badge)
+        for icon, text, command, badge in items:
+            btn = self._button(bar, text, command, glyph=glyph(icon), badge=badge)
             btn.pack(side="left", fill="x", expand=True, padx=int(2 * s))
 
         # zone d'information / de confirmation de la mise à jour (masquée par défaut)
         self.panel = tk.Frame(parent, bg=BG)
-        self.panel_text = tk.Label(self.panel, bg=BG, fg=FG, font=("Segoe UI", 9),
+        self.panel_text = tk.Label(self.panel, bg=BG, fg=FG, font=(self.ui, 9),
                                    justify="left", anchor="w", wraplength=int(260 * s))
         self.panel_text.pack(fill="x", padx=int(10 * s), pady=(int(6 * s), int(4 * s)))
         self.panel_buttons = tk.Frame(self.panel, bg=BG)
@@ -973,9 +1131,12 @@ class TrayMenu:
             "error": "Impossible de vérifier ou de télécharger la mise à jour. "
                      "Réessaie plus tard.",
             "available": f"La version {info.get('version', '')} est disponible "
-                         f"(tu as la {APP_VERSION}). L'installer maintenant ?",
-            "downloading": "Téléchargement de la mise à jour… L'application redémarrera "
-                           "toute seule.",
+                         f"(tu as la {APP_VERSION}). "
+                         + ("L'installer maintenant ?" if info.get("url")
+                            else "Ouvrir la page de téléchargement ?"),
+            "downloading": "Téléchargement de la mise à jour… "
+                           + ("L'application redémarrera toute seule." if IS_WIN
+                              else "Ton mot de passe sera demandé pour l'installer."),
         }
         visible = self.update_panel and app.update_state in texts
         sig = (visible, app.update_state if visible else None)
@@ -997,7 +1158,7 @@ class TrayMenu:
     def _type_selector(self, parent: tk.Frame) -> None:
         """Choix « Joue / Écoute / Regarde / Participe » en boutons arrondis."""
         s = self.s
-        tk.Label(parent, text="Affichage sur le profil", bg=BG, fg=MUTED, font=("Segoe UI", 9),
+        tk.Label(parent, text="Affichage sur le profil", bg=BG, fg=MUTED, font=(self.ui, 9),
                  anchor="w").pack(fill="x", padx=int(12 * s), pady=(int(2 * s), int(4 * s)))
         bar = tk.Frame(parent, bg=BG)
         bar.pack(padx=int(10 * s), pady=(0, int(4 * s)))
@@ -1029,7 +1190,7 @@ class TrayMenu:
             pts = [x1 + r, y1, x2 - r, y1, x2, y1, x2, y1 + r, x2, y2 - r, x2, y2,
                    x2 - r, y2, x1 + r, y2, x1, y2, x1, y2 - r, x1, y1 + r, x1, y1]
             cv.create_polygon(pts, smooth=True, fill=fill, outline=fill)
-        cv.create_text(W / 2, H / 2, text=text, font=("Segoe UI", 9),
+        cv.create_text(W / 2, H / 2, text=text, font=(self.ui, 9),
                        fill="white" if selected else FG)
 
     def _current_type(self) -> int:
@@ -1096,10 +1257,40 @@ class App:
         self.update_state = "idle"
         self.update_info: dict | None = None
         self.menu = TrayMenu(self)
-        self.icon = TrayIcon(
-            APP_NAME, make_icon(self.cfg["enabled"]), APP_NAME,
-            on_double=self.toggle_presence, on_menu=self.menu.show,
+        if IS_WIN:
+            self.icon = TrayIcon(
+                APP_NAME, make_icon(self.cfg["enabled"]), APP_NAME,
+                on_double=self.toggle_presence, on_menu=self.menu.show,
+            )
+        else:
+            # AppIndicator (GNOME avec l'extension, KDE, Xfce…) ne transmet pas les clics :
+            # menu natif avec l'essentiel, et « Ouvrir » pour le menu complet.
+            self.icon = pystray.Icon("naka-presence", make_icon(self.cfg["enabled"]), APP_NAME,
+                                     menu=self._native_menu())
+
+    def _native_menu(self):
+        item = pystray.MenuItem
+        return pystray.Menu(
+            item("Ouvrir NAKA Presence", lambda: self.menu.show(), default=True),
+            pystray.Menu.SEPARATOR,
+            item("Présence Discord", self.toggle_presence, checked=lambda _i: bool(self.cfg["enabled"])),
+            item("Musique du salon vocal", self.toggle_music,
+                 checked=lambda _i: bool(self.cfg.get("music_presence"))),
+            item(AUTOSTART_LABEL, self.toggle_autostart, checked=lambda _i: autostart_enabled()),
+            pystray.Menu.SEPARATOR,
+            item(lambda _i: (f"Mise à jour {self.update_info['version']} disponible…"
+                             if self.update_info else "Rechercher une mise à jour"),
+                 lambda: self.menu.show(update=True)),
+            item("Redémarrer", self.restart),
+            item("Quitter", self.quit),
         )
+
+    def _refresh_native_menu(self) -> None:
+        if not IS_WIN:
+            try:
+                self.icon.update_menu()
+            except Exception:
+                pass
 
     def reload_if_changed(self) -> None:
         mtime = config_mtime()
@@ -1113,6 +1304,7 @@ class App:
         self.cfg_mtime = config_mtime()
         self.worker.refresh.set()
         self.menu.refresh()
+        self._refresh_native_menu()
 
     def update_tooltip(self) -> None:
         title = f"{APP_NAME} — {self.worker.status}"
@@ -1120,6 +1312,7 @@ class App:
             title += f"\nMise à jour disponible : v{self.update_info['version']}"
         self.icon.title = title
         self.menu.refresh()
+        self._refresh_native_menu()
 
     # --- mises à jour : recherche au lancement et au clic, jamais en tâche de fond ---
     def check_updates(self) -> None:
@@ -1141,6 +1334,9 @@ class App:
     def install_update(self) -> None:
         if self.update_info is None or self.update_state == "downloading":
             return
+        if not self.update_info.get("url"):
+            open_target(self.update_info["page"])  # lancé depuis les sources : page de la release
+            return
         self.update_state = "downloading"
         self.menu.refresh()
         threading.Thread(target=self._install_update, daemon=True).start()
@@ -1152,6 +1348,21 @@ class App:
             self.update_state = "error"
             self.menu.refresh()
             return
+        if not IS_WIN:
+            # apt / dnf installent le paquet en root : pkexec demande le mot de passe
+            tool = ["apt-get", "install", "-y"] if setup.suffix == ".deb" else ["dnf", "install", "-y"]
+            try:
+                done = subprocess.run(["pkexec", *tool, str(setup)], close_fds=True,
+                                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                ok = done.returncode == 0
+            except OSError:
+                ok = False
+            if not ok:  # mot de passe refusé ou installation impossible
+                self.update_state = "error"
+                self.menu.refresh()
+                return
+            self.restart()
+            return
         # l'installateur ferme l'application si besoin, met à jour puis la relance
         save_resume(self.worker.started_at)
         subprocess.Popen([str(setup), "/SILENT", "/SUPPRESSMSGBOXES", "/NORESTART"],
@@ -1159,11 +1370,10 @@ class App:
         self.quit()
 
     def restart(self, *_: object) -> None:
-        cmd = [sys.executable] if getattr(sys, "frozen", False) else [
-            sys.executable, str(Path(__file__).resolve())]
         env = dict(os.environ, PYINSTALLER_RESET_ENVIRONMENT="1")
         save_resume(self.worker.started_at)
-        subprocess.Popen(cmd + ["--restart"], close_fds=True, env=env)
+        subprocess.Popen(_command() + ["--restart"], close_fds=True, env=env,
+                         start_new_session=not IS_WIN)
         self.quit()
 
     def toggle_presence(self, *_: object) -> None:
@@ -1184,10 +1394,11 @@ class App:
 
     def toggle_autostart(self, *_: object) -> None:
         set_autostart(not autostart_enabled())
+        self._refresh_native_menu()
 
     def open_config(self, *_: object) -> None:
         load_config()
-        os.startfile(CONFIG_FILE)  # type: ignore[attr-defined]
+        open_target(str(CONFIG_FILE))
 
     def uninstall(self, *_: object) -> None:
         path = uninstaller_path()
@@ -1206,7 +1417,20 @@ class App:
         if not str(self.cfg.get("client_id") or "").strip():
             threading.Timer(1.0, self.open_config).start()
         threading.Timer(5.0, self.check_updates).start()  # une seule recherche au lancement
+        listener = getattr(_already_running, "sock", None)
+        if listener is not None:  # Linux : un 2e lancement (lanceur, menu) ouvre le menu complet
+            threading.Thread(target=self._listen, args=(listener,), daemon=True).start()
         self.icon.run()
+
+    def _listen(self, listener: socket.socket) -> None:
+        while True:
+            try:
+                conn, _ = listener.accept()
+                with conn:
+                    if conn.recv(16).startswith(b"show"):
+                        self.menu.show()
+            except OSError:
+                return
 
 
 def _already_running(wait: float = 0) -> bool:
@@ -1215,10 +1439,34 @@ def _already_running(wait: float = 0) -> bool:
     `wait` : délai pendant lequel on attend la fermeture de l'instance précédente
     (redémarrage depuis le menu).
     """
+    deadline = time.time() + wait
+    if not IS_WIN:
+        # socket Unix « abstraite » : libérée par le noyau à la fin du processus (pas de
+        # fichier verrou orphelin après un plantage) ; sert aussi à rouvrir le menu.
+        name = f"\0naka-presence-{os.getuid()}"
+        while True:
+            sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            try:
+                sock.bind(name)
+                sock.listen(4)
+                _already_running.sock = sock
+                return False
+            except OSError:
+                sock.close()
+            if time.time() >= deadline:
+                if not wait:  # lancé alors qu'il tourne déjà : on lui demande d'ouvrir le menu
+                    try:
+                        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as other:
+                            other.settimeout(2)
+                            other.connect(name)
+                            other.sendall(b"show")
+                    except OSError:
+                        pass
+                return True
+            time.sleep(0.25)
     kernel32 = ctypes.windll.kernel32
     kernel32.CreateMutexW.restype = ctypes.c_void_p
     kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
-    deadline = time.time() + wait
     while True:
         handle = kernel32.CreateMutexW(None, False, MUTEX_NAME)
         if kernel32.GetLastError() != 183:  # ERROR_ALREADY_EXISTS
@@ -1230,6 +1478,23 @@ def _already_running(wait: float = 0) -> bool:
         time.sleep(0.25)
 
 
+def selftest() -> int:
+    """Vérification sans Discord (intégration continue Linux) : icône, menu, présence."""
+    app = App()
+    print("plateforme :", sys.platform, "| icône :", type(app.icon).__module__)
+    print("configuration :", CONFIG_FILE, "| paquet :", LINUX_PACKAGED, linux_package_format())
+    print("activité :", sorted(app.worker._payload(app.cfg)))
+    app.menu.show()
+    time.sleep(4)
+    win = app.menu.win
+    print("menu ouvert :", win is not None, "| police :", getattr(app.menu, "ui", "?"))
+    app.menu.refresh()
+    time.sleep(1)
+    return 0 if win is not None else 1
+
+
 if __name__ == "__main__":
+    if "--selftest" in sys.argv:
+        sys.exit(selftest())
     if not _already_running(wait=15 if "--restart" in sys.argv else 0):
         App().run()

@@ -1,0 +1,63 @@
+# Paquets Linux de NAKA Presence (nfpm) : .deb (Debian, Ubuntu…) et .rpm (Fedora…).
+# Construits par packaging/linux/build.sh ; VERSION vient de APP_VERSION (naka_presence.py).
+# Python, Tk, Pillow et AppIndicator viennent de la distribution ; pystray et pypresence
+# (pur Python) sont fournis dans /usr/lib/naka-presence/vendor.
+name: naka-presence
+arch: all
+platform: linux
+version: ${VERSION}
+release: 1
+section: net
+priority: optional
+maintainer: NAKA <163353419+Wakizashi2313@users.noreply.github.com>
+description: |
+  Présence Discord du serveur NAKA, pilotée depuis la zone de notification.
+  Affiche « Joue à Naka Bot » (ou la musique du salon vocal) sur ton profil Discord.
+vendor: NAKA
+homepage: https://github.com/Wakizashi2313/naka-presence
+license: MIT
+
+contents:
+  - src: ./naka_presence.py
+    dst: /usr/lib/naka-presence/naka_presence.py
+  - src: ./icon.png
+    dst: /usr/lib/naka-presence/icon.png
+  - src: ./tray.png
+    dst: /usr/lib/naka-presence/tray.png
+  - src: ./build/linux/vendor
+    dst: /usr/lib/naka-presence/vendor
+    type: tree
+  - src: ./packaging/linux/naka-presence
+    dst: /usr/bin/naka-presence
+    file_info:
+      mode: 0755
+  - src: ./packaging/linux/naka-presence.desktop
+    dst: /usr/share/applications/naka-presence.desktop
+  - src: ./icon.png
+    dst: /usr/share/icons/hicolor/256x256/apps/naka-presence.png
+  - src: ./LICENSE
+    dst: /usr/share/doc/naka-presence/copyright
+
+overrides:
+  deb:
+    depends:
+      - python3 (>= 3.9)
+      - python3-tk
+      - python3-pil
+      - python3-pil.imagetk
+      - python3-gi
+      - gir1.2-ayatanaappindicator3-0.1
+      - python3-six
+    suggests:
+      - gnome-shell-extension-appindicator
+  rpm:
+    depends:
+      - python3
+      - python3-tkinter
+      - python3-pillow
+      - python3-pillow-tk
+      - python3-gobject
+      - libayatana-appindicator-gtk3
+      - python3-six
+    suggests:
+      - gnome-shell-extension-appindicator

@@ -1,0 +1,4 @@
+#!/bin/sh
+# Lanceur de NAKA Presence (paquets .deb / .rpm).
+# Si l'application tourne déjà, ce lancement lui demande d'ouvrir son menu.
+exec /usr/bin/python3 /usr/lib/naka-presence/naka_presence.py "$@"

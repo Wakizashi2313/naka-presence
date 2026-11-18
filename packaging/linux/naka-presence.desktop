@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=NAKA Presence
+GenericName=Présence Discord
+Comment=Affiche la présence du serveur Discord NAKA sur ton profil
+Exec=naka-presence
+Icon=naka-presence
+Terminal=false
+Categories=Network;InstantMessaging;
+Keywords=discord;presence;naka;
+StartupNotify=false
