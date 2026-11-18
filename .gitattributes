@@ -1,0 +1,4 @@
+# scripts et fichiers des paquets Linux : toujours en fin de ligne Unix
+packaging/linux/* text eol=lf
+*.sh text eol=lf
+*.yml text eol=lf
