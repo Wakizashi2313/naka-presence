@@ -51,7 +51,7 @@ def trim_memory() -> None:
         pass
 
 APP_NAME = "NAKA Presence"
-APP_VERSION = "1.2.0"  # reprise par build.ps1 pour l'installateur
+APP_VERSION = "1.3.0"  # reprise par build.ps1 pour l'installateur
 MUTEX_NAME = "NakaPresenceMutex"
 REPO = "Wakizashi2313/naka-presence"
 SETUP_ASSET = "NakaPresence-Setup.exe"
