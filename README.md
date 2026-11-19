@@ -80,7 +80,7 @@ de n'importe quelle façon : paquet, Flatpak ou Snap.
 |---|---|
 | Double-clic sur l'icône (Windows) | Active ou désactive la présence |
 | Clic droit sur l'icône (Windows) | Ouvre le menu |
-| Clic sur l'icône (Linux) | Menu rapide ; « Ouvrir NAKA Presence » affiche le menu complet |
+| Lancement depuis le menu des applications (Linux) | Ouvre la fenêtre de NAKA Presence ; la fermer laisse la présence active (icône : « Ouvrir NAKA Presence » la rouvre) |
 | Menu → Affichage sur le profil | Choisit « Joue », « Écoute », « Regarde » ou « Participe » |
 | Menu → Mise à jour | Cherche une nouvelle version et propose de l'installer |
 | Menu → Redémarrer | Relance l'application |
