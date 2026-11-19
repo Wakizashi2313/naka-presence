@@ -67,14 +67,17 @@ jobs:
           cat selftest.log
           grep -q "menu ouvert : True" selftest.log
           grep -q "code=0" selftest.log
-      - name: Capture avec des polices agrandies (Xft.dpi 144, comme GNOME mis à l'échelle)
+      - name: Captures avec d'autres réglages d'écran (DPI faible, polices agrandies)
         run: |
-          dbus-run-session -- xvfb-run -a -s "-screen 0 1280x800x24" sh -c '
-            echo "Xft.dpi: 144" | xrdb -merge
-            naka-presence --selftest > selftest-hidpi.log 2>&1 & pid=$!
-            sleep 3; import -window root menu-hidpi.png
-            wait $pid'
-          cat selftest-hidpi.log
+          for mode in dpi60 xft144; do
+            if [ $mode = dpi60 ]; then opts="-screen 0 1280x800x24 -dpi 60"; xft=""; else opts="-screen 0 1280x800x24"; xft="Xft.dpi: 144"; fi
+            dbus-run-session -- xvfb-run -a -s "$opts" sh -c "
+              [ -n '$xft' ] && echo '$xft' | xrdb -merge
+              naka-presence --selftest > selftest-$mode.log 2>&1 & pid=\$!
+              sleep 3; import -window root menu-$mode.png
+              wait \$pid"
+            cat selftest-$mode.log
+          done
       - name: Désinstallation
         run: |
           if command -v apt-get >/dev/null; then apt-get remove -y -qq naka-presence; else dnf remove -y -q naka-presence; fi

@@ -800,6 +800,10 @@ class TrayMenu:
         self.root = tk.Tk()
         self.root.withdraw()
         self.s = self.root.winfo_fpixels("1i") / 96
+        probe = tkfont.Font(root=self.root, family="TkDefaultFont", size=10)
+        self.diag = (f"1i={self.root.winfo_fpixels('1i'):.0f}px scaling={self.root.tk.call('tk', 'scaling')} "
+                     f"10pt: linespace={probe.metrics('linespace')} M×10={probe.measure('M' * 10)}")
+        del probe
         families = set(tkfont.families(self.root))
         if IS_WIN:
             self.ui = "Segoe UI"
@@ -1495,6 +1499,7 @@ def selftest() -> int:
     time.sleep(4)
     win = app.menu.win
     print("menu ouvert :", win is not None, "| police :", getattr(app.menu, "ui", "?"))
+    print("échelle :", round(getattr(app.menu, "s", 0), 2), "| mesures :", getattr(app.menu, "diag", ""))
     if win is not None and not IS_WIN:
         print("fenêtre :", repr(win.title()), "| classe :", win.winfo_class(),
               "| sans bordure :", bool(win.overrideredirect()))
