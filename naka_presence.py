@@ -690,6 +690,20 @@ ACCENT = "#5865F2"
 OFF = "#585863"
 GREEN = "#43b581"
 RED = "#f23f43"
+CARD = "#26262e"        # Linux : fond des cartes arrondies
+CARD_HOVER = "#31313b"
+
+# Gabarits (en pixels à 96 ppp, multipliés par l'échelle) : menu compact sous Windows,
+# fenêtre plus grande aux boutons plus gros sous Linux.
+LAYOUT = {
+    "width": 280, "pad": 6, "row": 38, "row_font": 10, "glyph": 12, "switch": (34, 18),
+    "pill": (62, 28), "pill_font": 9, "btn": 30, "btn_font": 8, "btn_glyph": 9,
+    "logo": 40, "title": 11, "small": 9, "wrap": 260, "panel_btn": 90,
+} if IS_WIN else {
+    "width": 380, "pad": 16, "row": 48, "row_font": 11, "glyph": 14, "switch": (44, 24),
+    "pill": (80, 36), "pill_font": 10, "btn": 42, "btn_font": 10, "btn_glyph": 12,
+    "logo": 52, "title": 13, "small": 10, "wrap": 330, "panel_btn": 110,
+}
 
 if IS_WIN:
     user32 = ctypes.windll.user32
@@ -799,21 +813,27 @@ class TrayMenu:
         tk = tk_module
         self.root = tk.Tk()
         self.root.withdraw()
-        self.s = self.root.winfo_fpixels("1i") / 96
-        probe = tkfont.Font(root=self.root, family="TkDefaultFont", size=10)
-        self.diag = (f"1i={self.root.winfo_fpixels('1i'):.0f}px scaling={self.root.tk.call('tk', 'scaling')} "
-                     f"10pt: linespace={probe.metrics('linespace')} M×10={probe.measure('M' * 10)}")
-        del probe
+        dpi = self.root.winfo_fpixels("1i")
+        self.s = dpi / 96
         families = set(tkfont.families(self.root))
         if IS_WIN:
             self.ui = "Segoe UI"
-            self.ui_title = ("Segoe UI Semibold", 11)
+            self.ui_title = ("Segoe UI Semibold", LAYOUT["title"])
             self.icon_font = "Segoe Fluent Icons" if "Segoe Fluent Icons" in families else "Segoe MDL2 Assets"
         else:  # police de l'interface du bureau ; les symboles viennent du repli de fontconfig
             self.ui = tkfont.nametofont("TkDefaultFont", root=self.root).actual("family")
-            self.ui_title = (self.ui, 11, "bold")
+            self.ui_title = (self.ui, LAYOUT["title"], "bold")
             self.icon_font = self.ui
-        size = int(40 * self.s)
+            if dpi < 96:  # écran mal déclaré (Xwayland…) : textes au moins à 96 ppp
+                self.root.tk.call("tk", "scaling", 96 / 72)
+            # L'échelle suit la police telle qu'elle s'affiche vraiment (mise à l'échelle de
+            # GNOME, « grands textes »…) : les dessins (interrupteurs, boutons) restent à sa taille.
+            probe = tkfont.Font(root=self.root, family=self.ui, size=10)
+            linespace = probe.metrics("linespace")
+            del probe
+            self.s = max(1.0, self.s, linespace / 16)  # 16 px : interligne d'un 10 pt à 96 ppp
+            self.diag = f"{dpi:.0f} ppp, interligne 10 pt = {linespace} px"
+        size = int(LAYOUT["logo"] * self.s)
         self.logo = ImageTk.PhotoImage(
             Image.open(_resource("icon.png")).convert("RGBA").resize((size, size), Image.LANCZOS))
         self.root.after(0, self._poll)
@@ -861,6 +881,7 @@ class TrayMenu:
         self.switches = []
         self.type_buttons = []
         self.redraws = []
+        self.cards = []
         # aucune référence à un widget ne doit survivre au thread Tk qui l'a créé
         self.panel = self.panel_text = self.panel_buttons = self.panel_anchor = None
         self.status_label = None
@@ -894,7 +915,7 @@ class TrayMenu:
             w.iconphoto(False, self.logo)
             w.resizable(False, False)
             w.protocol("WM_DELETE_WINDOW", self._close)
-            pad = 12
+            pad = LAYOUT["pad"]
         w.configure(bg=BG)
         self.win = w
         self.pos = pos
@@ -902,29 +923,40 @@ class TrayMenu:
 
         body = tk.Frame(w, bg=BG)
         body.pack(fill="both", expand=True, padx=int(pad * s), pady=int(pad * s))
-        tk.Frame(body, bg=BG, width=int(280 * s), height=1).pack()
+        tk.Frame(body, bg=BG, width=int(LAYOUT["width"] * s), height=1).pack()
 
         header = tk.Frame(body, bg=BG)
-        header.pack(fill="x", pady=(int(4 * s), int(6 * s)), padx=int(6 * s))
+        header.pack(fill="x", pady=(int(4 * s), int((6 if IS_WIN else 14) * s)), padx=int(6 * s))
         tk.Label(header, image=self.logo, bg=BG).pack(side="left")
         texts = tk.Frame(header, bg=BG)
         texts.pack(side="left", padx=int(12 * s))
         tk.Label(texts, text=APP_NAME, bg=BG, fg=FG, font=self.ui_title,
                  anchor="w").pack(fill="x")
-        self.status_label = tk.Label(texts, bg=BG, font=(self.ui, 9), anchor="w")
+        self.status_label = tk.Label(texts, bg=BG, font=(self.ui, LAYOUT["small"]), anchor="w")
         self.status_label.pack(fill="x")
         if not IS_WIN:
             tk.Label(header, text=f"v{APP_VERSION}", bg=BG, fg=MUTED,
-                     font=(self.ui, 8)).pack(side="right", anchor="n")
+                     font=(self.ui, 9)).pack(side="right", anchor="n")
+        if IS_WIN:
+            self._open_menu(body)
+        else:
+            self._open_window(body)
+        self._update_state()
+        self._place(w, pos)
 
-        self._separator(body)
+    def _switch_rows(self, parent) -> None:
         app = self.app
-        self._row(body, glyph("presence"), "Présence Discord", app.toggle_presence,
+        self._row(parent, glyph("presence"), "Présence Discord", app.toggle_presence,
                   lambda: app.cfg["enabled"], keep_open=True)
-        self._row(body, glyph("autostart"), AUTOSTART_LABEL, app.toggle_autostart,
+        self._row(parent, glyph("autostart"), AUTOSTART_LABEL, app.toggle_autostart,
                   autostart_enabled, keep_open=True)
-        self._row(body, glyph("music"), "Musique du salon vocal", app.toggle_music,
+        self._row(parent, glyph("music"), "Musique du salon vocal", app.toggle_music,
                   lambda: bool(app.cfg.get("music_presence")), keep_open=True)
+
+    def _open_menu(self, body) -> None:
+        """Windows : menu compact, sections séparées par des filets."""
+        self._separator(body)
+        self._switch_rows(body)
         self._separator(body)
         self._type_selector(body)
         self._separator(body)
@@ -932,10 +964,52 @@ class TrayMenu:
         self._separator(body)
         self._actions(body)
         self._separator(body)
-        self._row(body, glyph("quit"), "Quitter", app.quit)
+        self._row(body, glyph("quit"), "Quitter", self.app.quit)
 
-        self._update_state()
-        self._place(w, pos)
+    def _open_window(self, body) -> None:
+        """Linux : sections dans des cartes aux coins arrondis, gros boutons."""
+        self.cards = []
+        self._switch_rows(self._card(body))
+        self._type_selector(self._card(body, "Affichage sur le profil"))
+        self._quick_links(body)
+        self._actions(body)
+        self.win.update_idletasks()
+        for layout in self.cards:  # hauteur des cartes connue avant le placement
+            layout()
+
+    def _section(self, parent, text: str) -> None:
+        s = self.s
+        tk.Label(parent, text=text, bg=parent["bg"], fg=MUTED, font=(self.ui, LAYOUT["small"]),
+                 anchor="w").pack(fill="x", padx=int((12 if IS_WIN else 4) * s),
+                                  pady=(int(2 * s), int((4 if IS_WIN else 6) * s)))
+
+    def _card(self, parent, title: str = "") -> tk.Frame:
+        """Carte arrondie : un Canvas dessine le fond, le contenu est un Frame posé dessus."""
+        s = self.s
+        if title:
+            self._section(parent, title)
+        r, inset = int(14 * s), int(6 * s)
+        cv = tk.Canvas(parent, bg=parent["bg"], highlightthickness=0, width=1, height=1)
+        cv.pack(fill="x", pady=(0, int(14 * s)))
+        inner = tk.Frame(cv, bg=CARD)
+        item = cv.create_window(inset, inset, window=inner, anchor="nw")
+
+        def layout(_e=None) -> None:
+            W = cv.winfo_width() if cv.winfo_width() > 1 else int(LAYOUT["width"] * s)
+            H = inner.winfo_reqheight() + 2 * inset
+            cv.itemconfigure(item, width=W - 2 * inset)
+            if int(cv.cget("height")) != H:
+                cv.configure(height=H)
+            cv.delete("bg")
+            x1, y1, x2, y2 = 0, 0, W - 1, H - 1
+            pts = [x1 + r, y1, x2 - r, y1, x2, y1, x2, y1 + r, x2, y2 - r, x2, y2,
+                   x2 - r, y2, x1 + r, y2, x1, y2, x1, y2 - r, x1, y1 + r, x1, y1]
+            cv.create_polygon(pts, smooth=True, fill=CARD, outline=CARD, tags="bg")
+            cv.tag_lower("bg")
+
+        cv.bind("<Configure>", layout)
+        self.cards.append(layout)
+        return inner
 
     def _reposition(self, w: tk.Toplevel, pos: tuple[int, int]) -> None:
         w.update_idletasks()
@@ -980,17 +1054,23 @@ class TrayMenu:
     def _row(self, parent, glyph, text, action, state=None, keep_open=False,
              enabled=lambda: True) -> None:
         s = self.s
-        row = tk.Frame(parent, bg=BG, height=int(38 * s))
+        base = parent["bg"]
+        hover_bg = CARD_HOVER if base == CARD else HOVER
+        row = tk.Frame(parent, bg=base, height=int(LAYOUT["row"] * s))
         row.pack(fill="x")
         row.pack_propagate(False)
-        icon = tk.Label(row, text=glyph, font=(self.icon_font, 12), bg=BG, fg=FG)
-        icon.pack(side="left", padx=int(12 * s))
-        label = tk.Label(row, text=text, font=(self.ui, 10), bg=BG, fg=FG, anchor="w")
+        icon = tk.Label(row, text=glyph, font=(self.icon_font, LAYOUT["glyph"]), bg=base, fg=FG)
+        if not IS_WIN:
+            icon.configure(width=2)  # symboles de largeurs variables : textes alignés
+        icon.pack(side="left", padx=int(12 * s) if IS_WIN else (int(10 * s), int(6 * s)))
+        label = tk.Label(row, text=text, font=(self.ui, LAYOUT["row_font"]), bg=base, fg=FG,
+                         anchor="w")
         label.pack(side="left", fill="x", expand=True)
         widgets = [row, icon, label]
         switch = None
         if state is not None:
-            switch = tk.Canvas(row, width=int(34 * s), height=int(18 * s), bg=BG,
+            sw, sh = LAYOUT["switch"]
+            switch = tk.Canvas(row, width=int(sw * s), height=int(sh * s), bg=base,
                                highlightthickness=0)
             switch.pack(side="right", padx=int(12 * s))
             widgets.append(switch)
@@ -1012,8 +1092,8 @@ class TrayMenu:
                 self._update_state()
 
         for widget in widgets:
-            widget.bind("<Enter>", lambda _e: paint(HOVER))
-            widget.bind("<Leave>", lambda _e: paint(BG))
+            widget.bind("<Enter>", lambda _e: paint(hover_bg))
+            widget.bind("<Leave>", lambda _e: paint(base))
             widget.bind("<Button-1>", on_click)
 
     # --- petits boutons : Redémarrer / Mise à jour / Désinstaller ---
@@ -1021,32 +1101,36 @@ class TrayMenu:
                 badge=lambda: False, width: int = 0) -> tk.Canvas:
         """Petit bouton arrondi (contour discret, ou plein pour l'action principale)."""
         s = self.s
-        H = int(30 * s)
-        cv = tk.Canvas(parent, height=H, width=width or int(10 * s), bg=BG,
+        H = int(LAYOUT["btn"] * s)
+        base = parent["bg"]
+        cv = tk.Canvas(parent, height=H, width=width or int(10 * s), bg=base,
                        highlightthickness=0, cursor="hand2")
         state = {"hover": False}
-        label_font = (self.ui, 8)
+        label_font = (self.ui, LAYOUT["btn_font"])
 
         def draw(_e=None) -> None:
             W = cv.winfo_width() if cv.winfo_width() > 1 else (width or int(88 * s))
             cv.delete("all")
-            r = int(9 * s)
+            r = int((9 if IS_WIN else 12) * s)
             x1, y1, x2, y2 = 1, 1, W - 2, H - 2
             pts = [x1 + r, y1, x2 - r, y1, x2, y1, x2, y1 + r, x2, y2 - r, x2, y2,
                    x2 - r, y2, x1 + r, y2, x1, y2, x1, y2 - r, x1, y1 + r, x1, y1]
             if primary:
                 fill = "#4752c4" if state["hover"] else ACCENT
                 outline = fill
-            else:
-                fill = HOVER if state["hover"] else BG
+            elif IS_WIN:
+                fill = HOVER if state["hover"] else base
                 outline = SEP
+            else:  # Linux : boutons pleins, comme les cartes
+                fill = CARD_HOVER if state["hover"] else CARD
+                outline = fill
             cv.create_polygon(pts, smooth=True, fill=fill, outline=outline)
             if glyph:
                 tw = _text_width(cv, text, label_font)
-                gw = int(16 * s)
+                gw = int(LAYOUT["btn_glyph"] * 1.8 * s)
                 x0 = (W - tw - gw) / 2
                 cv.create_text(x0 + gw / 2 - 2 * s, H / 2, text=glyph,
-                               font=(self.icon_font, 9), fill=FG)
+                               font=(self.icon_font, LAYOUT["btn_glyph"]), fill=FG)
                 cv.create_text(x0 + gw, H / 2, text=text, font=label_font, fill=FG, anchor="w")
             else:
                 cv.create_text(W / 2, H / 2, text=text, font=label_font,
@@ -1054,7 +1138,7 @@ class TrayMenu:
             if badge():  # pastille : mise à jour disponible
                 d = int(8 * s)
                 x2, y1 = W - int(2 * s), int(1 * s)
-                cv.create_oval(x2 - d, y1, x2, y1 + d, fill=RED, outline=BG, width=max(1, int(s)))
+                cv.create_oval(x2 - d, y1, x2, y1 + d, fill=RED, outline=base, width=max(1, int(s)))
 
         def hover(on: bool) -> None:
             state["hover"] = on
@@ -1072,10 +1156,9 @@ class TrayMenu:
     def _quick_links(self, parent: tk.Frame) -> None:
         """Site / Musique / Stats : ouvre la page dans le navigateur (et ferme le menu Windows)."""
         s = self.s
-        tk.Label(parent, text="Accès rapide", bg=BG, fg=MUTED, font=(self.ui, 9),
-                 anchor="w").pack(fill="x", padx=int(12 * s), pady=(int(2 * s), int(4 * s)))
+        self._section(parent, "Accès rapide")
         bar = tk.Frame(parent, bg=BG)
-        bar.pack(fill="x", padx=int(6 * s), pady=(0, int(4 * s)))
+        bar.pack(fill="x", padx=int((6 if IS_WIN else 0) * s), pady=(0, int((4 if IS_WIN else 14) * s)))
         for icon, text, url in QUICK_LINKS:
             def open_page(u=url) -> None:
                 if IS_WIN:
@@ -1088,26 +1171,29 @@ class TrayMenu:
         s = self.s
         app = self.app
         bar = tk.Frame(parent, bg=BG)
-        bar.pack(fill="x", padx=int(6 * s), pady=int(2 * s))
+        bar.pack(fill="x", padx=int((6 if IS_WIN else 0) * s), pady=int(2 * s))
         items = [("restart", "Redémarrer", lambda: (self._close(), app.restart()), lambda: False),
                  ("update", "Mise à jour", self._on_update, lambda: app.update_info is not None)]
         if uninstaller_path() is not None:
             items.append(("uninstall", "Désinstaller", lambda: (self._close(), app.uninstall()),
                           lambda: False))
+        if not IS_WIN:  # Linux : Quitter rejoint la rangée de boutons
+            items.append(("quit", "Quitter", app.quit, lambda: False))
         for icon, text, command, badge in items:
             btn = self._button(bar, text, command, glyph=glyph(icon), badge=badge)
             btn.pack(side="left", fill="x", expand=True, padx=int(2 * s))
 
         # zone d'information / de confirmation de la mise à jour (masquée par défaut)
         self.panel = tk.Frame(parent, bg=BG)
-        self.panel_text = tk.Label(self.panel, bg=BG, fg=FG, font=(self.ui, 9),
-                                   justify="left", anchor="w", wraplength=int(260 * s))
+        self.panel_text = tk.Label(self.panel, bg=BG, fg=FG, font=(self.ui, LAYOUT["small"]),
+                                   justify="left", anchor="w",
+                                   wraplength=int(LAYOUT["wrap"] * s))
         self.panel_text.pack(fill="x", padx=int(10 * s), pady=(int(6 * s), int(4 * s)))
         self.panel_buttons = tk.Frame(self.panel, bg=BG)
-        later = self._button(self.panel_buttons, "Plus tard", self._hide_panel, width=int(90 * s))
+        later = self._button(self.panel_buttons, "Plus tard", self._hide_panel, width=int(LAYOUT["panel_btn"] * s))
         later.pack(side="right", padx=int(2 * s))
         install = self._button(self.panel_buttons, "Installer", self._confirm_update,
-                               primary=True, width=int(90 * s))
+                               primary=True, width=int(LAYOUT["panel_btn"] * s))
         install.pack(side="right", padx=int(2 * s))
         self.panel_anchor = bar
         self.panel_sig = None
@@ -1164,14 +1250,15 @@ class TrayMenu:
     def _type_selector(self, parent: tk.Frame) -> None:
         """Choix « Joue / Écoute / Regarde / Participe » en boutons arrondis."""
         s = self.s
-        tk.Label(parent, text="Affichage sur le profil", bg=BG, fg=MUTED, font=(self.ui, 9),
-                 anchor="w").pack(fill="x", padx=int(12 * s), pady=(int(2 * s), int(4 * s)))
-        bar = tk.Frame(parent, bg=BG)
-        bar.pack(padx=int(10 * s), pady=(0, int(4 * s)))
+        if IS_WIN:
+            self._section(parent, "Affichage sur le profil")
+        base = parent["bg"]
+        bar = tk.Frame(parent, bg=base)
+        bar.pack(padx=int(10 * s), pady=(0, int(4 * s)) if IS_WIN else int(4 * s))
         self.type_buttons = []
-        width, height = int(62 * s), int(28 * s)
+        width, height = (int(v * s) for v in LAYOUT["pill"])
         for value, text in ACTIVITY_TYPES:
-            cv = tk.Canvas(bar, width=width, height=height, bg=BG, highlightthickness=0,
+            cv = tk.Canvas(bar, width=width, height=height, bg=base, highlightthickness=0,
                            cursor="hand2")
             cv.pack(side="left", padx=int(1 * s))
             self.type_buttons.append((cv, value, text))
@@ -1186,17 +1273,18 @@ class TrayMenu:
 
     def _draw_pill(self, cv: tk.Canvas, text: str, value: int, hover: bool) -> None:
         s = self.s
-        W, H = int(62 * s), int(28 * s)
+        W, H = (int(v * s) for v in LAYOUT["pill"])
         selected = value == self._current_type()
         cv.delete("all")
-        fill = ACCENT if selected else (HOVER if hover else None)
+        hover_bg = CARD_HOVER if cv.cget("bg") == CARD else HOVER
+        fill = ACCENT if selected else (hover_bg if hover else None)
         if fill:
             r = int(10 * s)  # rayon des coins
             x1, y1, x2, y2 = 1, 1, W - 1, H - 1
             pts = [x1 + r, y1, x2 - r, y1, x2, y1, x2, y1 + r, x2, y2 - r, x2, y2,
                    x2 - r, y2, x1 + r, y2, x1, y2, x1, y2 - r, x1, y1 + r, x1, y1]
             cv.create_polygon(pts, smooth=True, fill=fill, outline=fill)
-        cv.create_text(W / 2, H / 2, text=text, font=(self.ui, 9),
+        cv.create_text(W / 2, H / 2, text=text, font=(self.ui, LAYOUT["pill_font"]),
                        fill="white" if selected else FG)
 
     def _current_type(self) -> int:
@@ -1205,7 +1293,7 @@ class TrayMenu:
 
     def _draw_switch(self, cv: tk.Canvas, on: bool, bg: str, enabled: bool = True) -> None:
         s = self.s
-        W, H = int(34 * s), int(18 * s)
+        W, H = (int(v * s) for v in LAYOUT["switch"])
         color = (ACCENT if on else OFF) if enabled else SEP
         cv.configure(bg=bg)
         cv.delete("all")
