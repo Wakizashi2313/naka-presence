@@ -885,6 +885,7 @@ class TrayMenu:
         else:  # fenêtre normale (barre de titre du bureau) ; la fermer laisse tourner la présence
             # classe X11 « naka-presence » = StartupWMClass du .desktop (bonne icône dans le dock)
             w = tk.Toplevel(self.root, class_="naka-presence")
+            w.withdraw()  # affichée par _place, une fois sa position calculée
             w.title(APP_NAME)
             w.iconphoto(False, self.logo)
             w.resizable(False, False)
