@@ -50,10 +50,10 @@ jobs:
           if command -v apt-get >/dev/null; then
             apt-get update -qq
             DEBIAN_FRONTEND=noninteractive apt-get install -y -qq ./dist/*.deb \
-              xvfb xauth dbus-x11 imagemagick fonts-dejavu-core >/dev/null
+              xvfb xauth dbus-x11 x11-xserver-utils imagemagick fonts-dejavu-core >/dev/null
           else
             dnf install -y -q ./dist/*.rpm xorg-x11-server-Xvfb xorg-x11-xauth dbus-daemon dbus-tools \
-              ImageMagick dejavu-sans-fonts which
+              ImageMagick dejavu-sans-fonts xrdb which
           fi
           command -v naka-presence
           test -f /usr/share/applications/naka-presence.desktop
@@ -67,6 +67,14 @@ jobs:
           cat selftest.log
           grep -q "menu ouvert : True" selftest.log
           grep -q "code=0" selftest.log
+      - name: Capture avec des polices agrandies (Xft.dpi 144, comme GNOME mis à l'échelle)
+        run: |
+          dbus-run-session -- xvfb-run -a -s "-screen 0 1280x800x24" sh -c '
+            echo "Xft.dpi: 144" | xrdb -merge
+            naka-presence --selftest > selftest-hidpi.log 2>&1 & pid=$!
+            sleep 3; import -window root menu-hidpi.png
+            wait $pid'
+          cat selftest-hidpi.log
       - name: Désinstallation
         run: |
           if command -v apt-get >/dev/null; then apt-get remove -y -qq naka-presence; else dnf remove -y -q naka-presence; fi
@@ -79,8 +87,8 @@ jobs:
         with:
           name: ${{ env.SHOT }}
           path: |
-            menu.png
-            selftest.log
+            menu*.png
+            selftest*.log
 
   release:
     if: github.event_name == 'release'
