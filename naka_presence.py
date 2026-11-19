@@ -218,7 +218,7 @@ def set_autostart(on: bool) -> None:
             AUTOSTART_FILE.parent.mkdir(parents=True, exist_ok=True)
             AUTOSTART_FILE.write_text(
                 "[Desktop Entry]\nType=Application\nName=NAKA Presence\n"
-                f"Exec={_exe_command()}\nIcon=naka-presence\nTerminal=false\n"
+                f"Exec={_exe_command()} --background\nIcon=naka-presence\nTerminal=false\n"
                 "X-GNOME-Autostart-enabled=true\n", encoding="utf-8")
         else:
             AUTOSTART_FILE.unlink(missing_ok=True)
@@ -828,7 +828,12 @@ class TrayMenu:
                 cmd, arg = self.q.get_nowait()
                 if cmd == "show":
                     pos, update = arg
-                    self._open(pos or self.root.winfo_pointerxy())
+                    if not IS_WIN and self.win is not None:  # fenêtre déjà ouverte : au premier plan
+                        self.win.deiconify()
+                        self.win.lift()
+                        self.win.focus_force()
+                    else:
+                        self._open(pos or self.root.winfo_pointerxy())
                     if update:
                         self._on_update()
                 elif cmd == "refresh":
@@ -858,7 +863,7 @@ class TrayMenu:
 
     def _close_if_click_outside(self) -> None:
         if not IS_WIN:
-            return  # Linux : fermeture à la perte du focus (_on_focus_out)
+            return  # Linux : fenêtre normale, fermée par sa barre de titre
         pressed = any(user32.GetAsyncKeyState(vk) & 0x8000 for vk in (0x01, 0x02, 0x04))
         if not pressed or self.win is None:
             return
@@ -872,20 +877,26 @@ class TrayMenu:
     def _open(self, pos: tuple[int, int]) -> None:
         self._close()
         s = self.s
-        w = tk.Toplevel(self.root)
-        w.overrideredirect(True)
-        w.attributes("-topmost", True)
+        if IS_WIN:  # menu flottant près de l'icône, sans bordure
+            w = tk.Toplevel(self.root)
+            w.overrideredirect(True)
+            w.attributes("-topmost", True)
+            pad = 6
+        else:  # fenêtre normale (barre de titre du bureau) ; la fermer laisse tourner la présence
+            # classe X11 « naka-presence » = StartupWMClass du .desktop (bonne icône dans le dock)
+            w = tk.Toplevel(self.root, class_="naka-presence")
+            w.title(APP_NAME)
+            w.iconphoto(False, self.logo)
+            w.resizable(False, False)
+            w.protocol("WM_DELETE_WINDOW", self._close)
+            pad = 12
         w.configure(bg=BG)
-        if not IS_WIN:  # pas d'acrylique ni de coins arrondis : un liseré discret
-            w.configure(highlightthickness=1, highlightbackground=SEP, highlightcolor=SEP)
-            w.bind("<Escape>", lambda _e: self._close())
-            w.bind("<FocusOut>", lambda _e: self.root.after(150, self._on_focus_out))
         self.win = w
         self.pos = pos
         self.update_panel = False
 
         body = tk.Frame(w, bg=BG)
-        body.pack(fill="both", expand=True, padx=int(6 * s), pady=int(6 * s))
+        body.pack(fill="both", expand=True, padx=int(pad * s), pady=int(pad * s))
         tk.Frame(body, bg=BG, width=int(280 * s), height=1).pack()
 
         header = tk.Frame(body, bg=BG)
@@ -897,6 +908,9 @@ class TrayMenu:
                  anchor="w").pack(fill="x")
         self.status_label = tk.Label(texts, bg=BG, font=(self.ui, 9), anchor="w")
         self.status_label.pack(fill="x")
+        if not IS_WIN:
+            tk.Label(header, text=f"v{APP_VERSION}", bg=BG, fg=MUTED,
+                     font=(self.ui, 8)).pack(side="right", anchor="n")
 
         self._separator(body)
         app = self.app
@@ -920,19 +934,10 @@ class TrayMenu:
 
     def _reposition(self, w: tk.Toplevel, pos: tuple[int, int]) -> None:
         w.update_idletasks()
+        if not IS_WIN:
+            return  # fenêtre normale : elle reste où l'utilisateur l'a mise, sa taille suit
         width, height = w.winfo_reqwidth(), w.winfo_reqheight()
-        if IS_WIN:
-            left, top, right, bottom = _work_area(*pos)
-        else:  # écran entier ; la barre du haut (GNOME) ou du bas est évitée ci-dessous
-            left, top = 0, 0
-            right, bottom = w.winfo_screenwidth(), w.winfo_screenheight()
-            bar = int(40 * self.s)
-            if pos[1] < bottom // 2:
-                pos = (pos[0], top)
-                top += bar
-            else:
-                pos = (pos[0], bottom)
-                bottom -= bar
+        left, top, right, bottom = _work_area(*pos)
         margin = int(8 * self.s)
         x = min(max(pos[0] - width // 2, left + margin), right - width - margin)
         if pos[1] >= bottom - 1:          # barre des tâches en bas
@@ -944,12 +949,18 @@ class TrayMenu:
         w.geometry(f"+{x}+{y}")
 
     def _place(self, w: tk.Toplevel, pos: tuple[int, int]) -> None:
+        if not IS_WIN:  # centrée à l'ouverture
+            w.update_idletasks()
+            x = (w.winfo_screenwidth() - w.winfo_reqwidth()) // 2
+            y = (w.winfo_screenheight() - w.winfo_reqheight()) // 3
+            w.geometry(f"+{max(x, 0)}+{max(y, 0)}")
+            w.deiconify()
+            w.lift()
+            w.focus_force()
+            return
         self._reposition(w, pos)
         w.deiconify()
         w.lift()
-        if not IS_WIN:
-            w.focus_force()
-            return
         try:  # coins arrondis + liseré discret (Windows 11) + fond acrylique
             hwnd = user32.GetAncestor(w.winfo_id(), 2)
             dwmapi.DwmSetWindowAttribute(hwnd, 33, ctypes.byref(ctypes.c_int(2)), 4)
@@ -957,17 +968,6 @@ class TrayMenu:
             _acrylic(hwnd)
         except Exception:
             pass
-
-    def _on_focus_out(self) -> None:
-        """Linux : un clic ailleurs retire le focus au menu, qui se ferme alors."""
-        if self.win is None:
-            return
-        try:
-            focus = self.win.focus_get()
-        except (KeyError, tk.TclError):
-            focus = None
-        if focus is None or not str(focus).startswith(str(self.win)):
-            self._close()
 
     def _separator(self, parent: tk.Frame) -> None:
         tk.Frame(parent, bg=SEP, height=1).pack(fill="x", pady=int(4 * self.s), padx=int(6 * self.s))
@@ -1065,7 +1065,7 @@ class TrayMenu:
         return cv
 
     def _quick_links(self, parent: tk.Frame) -> None:
-        """Site / Musique / Stats : ouvre la page dans le navigateur et ferme le menu."""
+        """Site / Musique / Stats : ouvre la page dans le navigateur (et ferme le menu Windows)."""
         s = self.s
         tk.Label(parent, text="Accès rapide", bg=BG, fg=MUTED, font=(self.ui, 9),
                  anchor="w").pack(fill="x", padx=int(12 * s), pady=(int(2 * s), int(4 * s)))
@@ -1073,7 +1073,8 @@ class TrayMenu:
         bar.pack(fill="x", padx=int(6 * s), pady=(0, int(4 * s)))
         for icon, text, url in QUICK_LINKS:
             def open_page(u=url) -> None:
-                self._close()
+                if IS_WIN:
+                    self._close()
                 open_target(u)  # navigateur par défaut
             self._button(bar, text, open_page, glyph=glyph(icon)).pack(
                 side="left", fill="x", expand=True, padx=int(2 * s))
@@ -1418,8 +1419,13 @@ class App:
             threading.Timer(1.0, self.open_config).start()
         threading.Timer(5.0, self.check_updates).start()  # une seule recherche au lancement
         listener = getattr(_already_running, "sock", None)
-        if listener is not None:  # Linux : un 2e lancement (lanceur, menu) ouvre le menu complet
+        if listener is not None:  # Linux : un 2e lancement (lanceur, menu) ouvre la fenêtre
             threading.Thread(target=self._listen, args=(listener,), daemon=True).start()
+        if not IS_WIN:
+            if autostart_enabled():
+                set_autostart(True)  # ancienne entrée sans --background : réécrite
+            if "--background" not in sys.argv:  # lancé à la main : fenêtre ouverte
+                self.menu.show()
         self.icon.run()
 
     def _listen(self, listener: socket.socket) -> None:
@@ -1488,6 +1494,9 @@ def selftest() -> int:
     time.sleep(4)
     win = app.menu.win
     print("menu ouvert :", win is not None, "| police :", getattr(app.menu, "ui", "?"))
+    if win is not None and not IS_WIN:
+        print("fenêtre :", repr(win.title()), "| classe :", win.winfo_class(),
+              "| sans bordure :", bool(win.overrideredirect()))
     app.menu.refresh()
     time.sleep(1)
     return 0 if win is not None else 1

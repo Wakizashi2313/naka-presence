@@ -9,3 +9,4 @@ Terminal=false
 Categories=Network;InstantMessaging;
 Keywords=discord;presence;naka;
 StartupNotify=false
+StartupWMClass=naka-presence
